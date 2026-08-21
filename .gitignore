@@ -10,7 +10,15 @@ __pycache__/
 # Local runtime data, credentials, logs, and debug screenshots
 runtime/
 
+# Python packaging output
+.build-deps/
+build/
+dist/
+release/
+*.spec.bak
+
 # Common local tooling files
+.idea/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
