@@ -1,0 +1,21 @@
+# Python virtual environments
+.venv/
+venv/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local runtime data, credentials, logs, and debug screenshots
+runtime/
+
+# Common local tooling files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
