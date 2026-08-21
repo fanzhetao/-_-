@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 from datetime import datetime
+from pathlib import Path
 import queue
 import shutil
+import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -10,12 +13,50 @@ from tkinter import messagebox, ttk
 import runner
 
 
+BASE_WINDOW_WIDTH = 640
+BASE_WINDOW_HEIGHT = 560
+MIN_WINDOW_WIDTH = 560
+MIN_WINDOW_HEIGHT = 480
+
+
+def calculate_ui_scale(screen_width: int, screen_height: int, dpi: float) -> float:
+    dpi_scale = max(dpi, 96.0) / 96.0
+    resolution_scale = min(max(screen_width, 1) / 1920.0, max(screen_height, 1) / 1080.0)
+    return max(1.0, min(2.0, max(dpi_scale, resolution_scale)))
+
+
+def enable_windows_dpi_awareness() -> None:
+    """让 Tk 在 1080p、2K、4K 和混合 DPI 显示器上保持清晰。"""
+    if sys.platform != "win32":
+        return
+
+    try:
+        # Windows 10 1703+：Per-Monitor v2，随窗口所在显示器使用正确 DPI。
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        # Windows 8.1+ 回退。
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
 class FashionMallClient:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("时尚百货城自动化")
-        self.root.geometry("620x520")
-        self.root.minsize(560, 460)
+        self.ui_scale = self._configure_display_scaling()
+        self.root.geometry(self._centered_geometry(BASE_WINDOW_WIDTH, BASE_WINDOW_HEIGHT))
+        self.root.minsize(self._px(MIN_WINDOW_WIDTH), self._px(MIN_WINDOW_HEIGHT))
 
         config = runner.load_local_config()
         self.account = tk.StringVar(value=str(config.get("account", "")))
@@ -43,31 +84,62 @@ class FashionMallClient:
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _configure_display_scaling(self) -> float:
+        self.root.update_idletasks()
+        screen_width = max(self.root.winfo_screenwidth(), 1)
+        screen_height = max(self.root.winfo_screenheight(), 1)
+        try:
+            dpi = float(self.root.winfo_fpixels("1i"))
+        except (tk.TclError, ValueError):
+            dpi = 96.0
+
+        # 即使 Windows 缩放被手动设为 100%，高分屏也不会显示成一个很小的窗口。
+        scale = calculate_ui_scale(screen_width, screen_height, dpi)
+        self.root.tk.call("tk", "scaling", (96.0 / 72.0) * scale)
+        ttk.Style(self.root).configure(".", font=("Microsoft YaHei UI", 9))
+        return scale
+
+    def _px(self, value: int) -> int:
+        return max(1, round(value * self.ui_scale))
+
+    def _centered_geometry(self, width: int, height: int) -> str:
+        scaled_width = min(self._px(width), round(self.root.winfo_screenwidth() * 0.9))
+        scaled_height = min(self._px(height), round(self.root.winfo_screenheight() * 0.9))
+        left = max(0, (self.root.winfo_screenwidth() - scaled_width) // 2)
+        top = max(0, (self.root.winfo_screenheight() - scaled_height) // 2)
+        return f"{scaled_width}x{scaled_height}+{left}+{top}"
+
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=20)
+        outer = ttk.Frame(self.root, padding=self._px(20))
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(1, weight=1)
         outer.rowconfigure(6, weight=1)
 
         ttk.Label(outer, text="时尚百货城自动化", font=("Microsoft YaHei UI", 18, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 18)
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, self._px(18))
         )
 
-        ttk.Label(outer, text="游戏账号").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(outer, text="游戏账号").grid(
+            row=1, column=0, sticky="w", padx=(0, self._px(12)), pady=self._px(6)
+        )
         self.account_entry = ttk.Entry(outer, textvariable=self.account)
-        self.account_entry.grid(row=1, column=1, columnspan=2, sticky="ew", pady=6)
+        self.account_entry.grid(row=1, column=1, columnspan=2, sticky="ew", pady=self._px(6))
 
-        ttk.Label(outer, text="游戏密码").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(outer, text="游戏密码").grid(
+            row=2, column=0, sticky="w", padx=(0, self._px(12)), pady=self._px(6)
+        )
         self.password_entry = ttk.Entry(outer, textvariable=self.password, show="•")
-        self.password_entry.grid(row=2, column=1, sticky="ew", pady=6)
+        self.password_entry.grid(row=2, column=1, sticky="ew", pady=self._px(6))
         ttk.Checkbutton(
             outer,
             text="显示",
             variable=self.show_password,
             command=self._toggle_password,
-        ).grid(row=2, column=2, sticky="e", padx=(10, 0))
+        ).grid(row=2, column=2, sticky="e", padx=(self._px(10), 0))
 
-        ttk.Label(outer, text="目标区号").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(outer, text="目标区号").grid(
+            row=3, column=0, sticky="w", padx=(0, self._px(12)), pady=self._px(6)
+        )
         self.server_entry = ttk.Spinbox(
             outer,
             from_=1,
@@ -75,25 +147,31 @@ class FashionMallClient:
             textvariable=self.server_number,
             width=12,
         )
-        self.server_entry.grid(row=3, column=1, columnspan=2, sticky="w", pady=6)
+        self.server_entry.grid(row=3, column=1, columnspan=2, sticky="w", pady=self._px(6))
 
         controls = ttk.Frame(outer)
-        controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(14, 10))
+        controls.grid(
+            row=4,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(self._px(14), self._px(10)),
+        )
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
         controls.columnconfigure(2, weight=1)
         self.start_button = ttk.Button(controls, text="开始运行", command=self._start)
-        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, self._px(6)))
         self.stop_button = ttk.Button(controls, text="停止", command=self._stop, state="disabled")
-        self.stop_button.grid(row=0, column=1, sticky="ew", padx=6)
+        self.stop_button.grid(row=0, column=1, sticky="ew", padx=self._px(6))
         self.clear_button = ttk.Button(controls, text="清除本地配置", command=self._clear_config)
-        self.clear_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        self.clear_button.grid(row=0, column=2, sticky="ew", padx=(self._px(6), 0))
 
         ttk.Label(outer, textvariable=self.status, foreground="#2563eb").grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(0, 8)
+            row=5, column=0, columnspan=3, sticky="w", pady=(0, self._px(8))
         )
 
-        log_frame = ttk.LabelFrame(outer, text="运行状态", padding=8)
+        log_frame = ttk.LabelFrame(outer, text="运行状态", padding=self._px(8))
         log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
@@ -107,7 +185,7 @@ class FashionMallClient:
             outer,
             text="账号、密码和区号会明文保存在 runtime/config/client_config.json。",
             foreground="#666666",
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
 
         self.account_entry.focus_set()
         self.root.bind("<Return>", lambda _event: self._start())
@@ -295,6 +373,13 @@ class FashionMallClient:
 
 
 def main() -> None:
+    if "--self-check" in sys.argv:
+        runner.distribution_self_check()
+        marker_index = sys.argv.index("--self-check") + 1
+        if marker_index < len(sys.argv):
+            Path(sys.argv[marker_index]).write_text("ok\n", encoding="utf-8")
+        return
+    enable_windows_dpi_awareness()
     root = tk.Tk()
     FashionMallClient(root)
     root.mainloop()

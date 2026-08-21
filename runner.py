@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from typing import Callable
 
@@ -18,9 +19,11 @@ from maa.tasker import Tasker
 from maa.toolkit import AdbDevice, Toolkit
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-RESOURCE_DIR = PROJECT_DIR / "resource"
-RUNTIME_DIR = PROJECT_DIR / "runtime"
+SOURCE_DIR = Path(__file__).resolve().parent
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SOURCE_DIR))
+APPLICATION_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else SOURCE_DIR
+RESOURCE_DIR = BUNDLE_DIR / "resource"
+RUNTIME_DIR = APPLICATION_DIR / "runtime"
 OCR_DIR = RESOURCE_DIR / "model" / "ocr"
 OCR_FILES = ("det.onnx", "rec.onnx", "keys.txt")
 RUNTIME_OPTION_PATH = RUNTIME_DIR / "config" / "maa_option.json"
@@ -35,6 +38,8 @@ MUMU_MANAGER_CANDIDATES = (
 )
 ADB_SCREEN_EMULATOR_EXTRAS = 1 << 6
 ADB_INPUT_DEFAULT = (1 << 64) - 1 - (1 << 3)
+REFERENCE_SCREEN_WIDTH = 720
+REFERENCE_SCREEN_HEIGHT = 1280
 POPUP_QUIET_SECONDS = 5.0
 OFFLINE_REWARD_WAIT_SECONDS = 20.0
 POPUP_POLL_TIMEOUT_MS = 250
@@ -185,6 +190,33 @@ def require_ocr_model() -> None:
         raise RuntimeError(
             f"缺少 OCR 模型文件：{names}\n"
             f"请将 MaaCommonAssets 的中文 OCR 模型放入：{OCR_DIR}"
+        )
+
+
+def distribution_self_check() -> None:
+    """供便携包构建流程验证资源和 MaaFramework 原生库。"""
+    from maa.library import Library
+
+    require_ocr_model()
+    version = Library.version()
+    if not version:
+        raise RuntimeError("无法读取 MaaFramework 版本。")
+
+
+def validate_reference_canvas(controller: AdbController, report: Reporter = print) -> None:
+    """确认 MaaFramework 已生成 720×1280 的竖屏识别画布。"""
+    image = capture_screen(controller)
+    height, width = image.shape[:2]
+    raw_width, raw_height = controller.resolution
+    report(
+        f"[显示适配] 模拟器原始分辨率 {raw_width}×{raw_height}，"
+        f"识别画布 {width}×{height}"
+    )
+    if (width, height) != (REFERENCE_SCREEN_WIDTH, REFERENCE_SCREEN_HEIGHT):
+        raise RuntimeError(
+            "模拟器必须使用 9:16 竖屏分辨率。支持 720×1280、1080×1920、"
+            "1440×2560、2160×3840 等同比例分辨率；"
+            f"当前识别画布为 {width}×{height}。"
         )
 
 
@@ -1824,8 +1856,11 @@ def run_automation(
         input_methods=device.input_methods,
         config=device.config,
     )
+    if not controller.set_screenshot_target_long_side(REFERENCE_SCREEN_HEIGHT):
+        raise RuntimeError("无法配置 MaaFramework 截图缩放。")
     wait_job(controller.post_connection(), "连接模拟器")
     ensure_not_cancelled(cancel_event)
+    validate_reference_canvas(controller, report)
 
     if debug_screenshot_dir is not None:
         _ACTIVE_STEP_SCREENSHOT_RECORDER = StepScreenshotRecorder(
