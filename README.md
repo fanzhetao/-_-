@@ -5,7 +5,7 @@
 项目提供 Tkinter 桌面客户端，也支持直接从命令行运行。自动化流程以 OCR、颜色识别、固定坐标和跳转确认共同驱动；页面状态不明确时会停止操作，避免继续点击或消费资源。
 
 > [!IMPORTANT]
-> 当前流程按 MaaFramework 的 **720×1280 竖屏坐标**配置，并针对 **MuMu 模拟器 12** 的截图通道编排。请勿随意修改模拟器分辨率或界面缩放。
+> 当前流程按 MaaFramework 的 **720×1280 竖屏识别坐标**配置，并针对 **MuMu 模拟器 12** 的截图通道编排。客户端会把 1080×1920、1440×2560、2160×3840 等 9:16 竖屏分辨率自动缩放到该坐标系；其他宽高比会在开始操作前停止。
 
 ## 功能
 
@@ -36,8 +36,9 @@
 ## 环境要求
 
 - Windows。
-- Python 3.13；项目当前虚拟环境使用 Python 3.13.12。
+- 使用便携版时无需安装 Python；从源码运行或打包需要 Python 3.13。
 - MuMu 模拟器 12，并启用可用的 ADB 连接。
+- 模拟器使用 9:16 竖屏分辨率，例如 720×1280、1080×1920、1440×2560 或 2160×3840。
 - 中文 OCR 模型文件：
   - `resource/model/ocr/det.onnx`
   - `resource/model/ocr/rec.onnx`
@@ -46,15 +47,31 @@
 
 ## 快速开始
 
+### 便携版（推荐）
+
+解压 `FashionMallAutomation-Windows-x64.zip`，启动 MuMu 模拟器后双击 `FashionMallClient.exe`。便携版已经包含 Python、MaaFramework、OCR 模型及所需原生库，不需要安装 Python 包。
+
+客户端桌面界面支持 1920×1080、2560×1440 和 3840×2160，并会结合 Windows DPI 自动调整窗口、字体和间距。
+
+### 从源码运行
+
 在项目根目录创建虚拟环境并安装依赖：
 
 ```powershell
 py -3.13 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt Pillow
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 > [!NOTE]
-> `requirements.txt` 声明 MaaFw 5.12 至 6.0 之前的版本；Pillow 用于保存逐步调试截图，因此安装命令中单独列出。
+> `requirements.txt` 声明 MaaFw 5.12 至 6.0 之前的版本，并包含用于保存逐步调试截图的 Pillow。
+
+### 构建 Windows 便携版
+
+```powershell
+.\build_portable.ps1
+```
+
+脚本会安装打包依赖、生成 `dist/FashionMallAutomation/`，执行原生库与 OCR 资源自检，并输出 `release/FashionMallAutomation-Windows-x64.zip`。
 
 确认 OCR 模型文件已经放入 `resource/model/ocr/`，启动 MuMu 模拟器并保持在桌面或游戏登录页，然后双击：
 
@@ -122,6 +139,9 @@ FashionMallAutomation/
 ├─ client.py                         # Tkinter 桌面客户端与会话日志
 ├─ runner.py                         # 自动化流程、重试、页面确认和截图
 ├─ requirements.txt                  # MaaFramework Python 依赖范围
+├─ requirements-build.txt            # PyInstaller 打包依赖
+├─ FashionMallClient.spec            # Windows 便携版收集规则
+├─ build_portable.ps1                # 一键构建和压缩脚本
 ├─ 启动客户端.bat                    # Windows 桌面客户端入口
 ├─ 使用说明.md                       # 详细行为、坐标和安全说明
 ├─ resource/
@@ -145,7 +165,7 @@ FashionMallAutomation/
 
 ### 页面已经打开，但识别仍失败
 
-不要立即修改整个流程。先查看最新的 `runtime/debug/session-*.log`，再按日志中的 `step-*.png` 编号检查实际画面。常见原因包括弹窗遮挡、分辨率变化、页面尚未加载完成或 OCR ROI 需要重新校准。
+不要立即修改整个流程。先查看最新的 `runtime/debug/session-*.log`，再按日志中的 `step-*.png` 编号检查实际画面。常见原因包括弹窗遮挡、模拟器不是 9:16 竖屏、页面尚未加载完成或 OCR ROI 需要重新校准。
 
 ### 正常关闭后找不到调试截图
 
