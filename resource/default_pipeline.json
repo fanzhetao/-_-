@@ -1,0 +1,21 @@
+{
+    "Default": {
+        "rate_limit": 800,
+        "timeout": 20000,
+        "pre_delay": 250,
+        "post_delay": 500
+    },
+    "OCR": {
+        "recognition": "OCR",
+        "threshold": 0.3,
+        "order_by": "Expected",
+        "replace": [
+            ["l区", "1区"],
+            ["I区", "1区"]
+        ]
+    },
+    "Click": {
+        "action": "Click",
+        "target": true
+    }
+}
