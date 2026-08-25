@@ -86,6 +86,8 @@ DAILY_TASK_REWIND_SWIPES = 8
 DAILY_INVENTORY_MAX_SWIPES = 20
 DAILY_TASK_ROW_Y_TOLERANCE = 85
 DAILY_FORWARD_POST_CLICK_SECONDS = 2.0
+DAILY_100_REWARD_RESULT_TIMEOUT_SECONDS = 5.0
+DEFAULT_GAME_PACKAGE = "com.tomato.android.ssbhw"
 DAILY_STATE_TODO = "待完成"
 DAILY_STATE_CLAIMABLE = "可领取"
 DAILY_STATE_CLAIMED = "已领取"
@@ -273,22 +275,90 @@ def load_local_config() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def save_local_config(account: str, password: str, server_number: int) -> None:
-    validate_credential(account, "账号")
-    validate_credential(password, "密码")
-    validate_server_number(server_number)
+def load_account_configs(config: dict | None = None) -> list[dict]:
+    """读取多账号配置，并兼容旧版单账号配置结构。"""
+    if config is None:
+        config = load_local_config()
+
+    raw_accounts = config.get("accounts")
+    if isinstance(raw_accounts, list):
+        accounts = []
+        for item in raw_accounts:
+            if not isinstance(item, dict):
+                continue
+            try:
+                server_number = int(item.get("server_number", 1))
+            except (TypeError, ValueError):
+                server_number = 1
+            accounts.append(
+                {
+                    "account": str(item.get("account", "")).strip(),
+                    "password": str(item.get("password", "")),
+                    "server_number": server_number,
+                    "active": bool(item.get("active", True)),
+                }
+            )
+        if accounts:
+            return accounts
+
+    account = str(config.get("account", "")).strip()
+    password = str(config.get("password", ""))
+    try:
+        server_number = int(config.get("server_number", 1))
+    except (TypeError, ValueError):
+        server_number = 1
+    if account or password:
+        return [
+            {
+                "account": account,
+                "password": password,
+                "server_number": server_number,
+                "active": True,
+            }
+        ]
+    return []
+
+
+def save_account_configs(accounts: list[dict]) -> None:
+    """原子保存账号队列；每个账号保留独立的启用状态。"""
+    normalized_accounts = []
+    for item in accounts:
+        account = str(item.get("account", "")).strip()
+        password = str(item.get("password", ""))
+        server_number = int(item.get("server_number", 1))
+        validate_credential(account, "账号")
+        validate_credential(password, "密码")
+        validate_server_number(server_number)
+        normalized_accounts.append(
+            {
+                "account": account,
+                "password": password,
+                "server_number": server_number,
+                "active": bool(item.get("active", True)),
+            }
+        )
+
     CLIENT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "account": account,
-        "password": password,
-        "server_number": server_number,
-    }
+    data = {"accounts": normalized_accounts}
     temp_path = CLIENT_CONFIG_PATH.with_suffix(".tmp")
     temp_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=4) + "\n",
         encoding="utf-8",
     )
     temp_path.replace(CLIENT_CONFIG_PATH)
+
+
+def save_local_config(account: str, password: str, server_number: int) -> None:
+    save_account_configs(
+        [
+            {
+                "account": account,
+                "password": password,
+                "server_number": server_number,
+                "active": True,
+            }
+        ]
+    )
 
 
 def clear_local_config() -> None:
@@ -2466,6 +2536,67 @@ def dismiss_result_overlay(
     capture_debug_step(f"结果弹层已关闭：{result_entry}")
 
 
+def claim_daily_100_reward(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """领取最右侧 100 礼包；已领取时识别仍在日常页并直接跳过。"""
+    run_task(tasker, "领取日常100活跃礼包", report, cancel_event)
+    deadline = time.monotonic() + DAILY_100_REWARD_RESULT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        if try_recognize(
+            tasker,
+            "日常100活跃礼包结果弹层",
+            timeout_ms=TRANSITION_CONFIRM_POLL_TIMEOUT_MS,
+            report=report,
+            cancel_event=cancel_event,
+            recover_interrupting_popup=False,
+        ):
+            dismiss_result_overlay(
+                tasker,
+                controller,
+                "日常100活跃礼包结果弹层",
+                report,
+                cancel_event,
+            )
+            report("[日常] 100 活跃礼包已领取并关闭结果层")
+            return
+        if try_recognize(
+            tasker,
+            "日常100活跃礼包重复领取弹窗",
+            timeout_ms=TRANSITION_CONFIRM_POLL_TIMEOUT_MS,
+            report=report,
+            cancel_event=cancel_event,
+            recover_interrupting_popup=False,
+        ):
+            run_task(
+                tasker,
+                "关闭日常100活跃礼包重复领取弹窗",
+                report,
+                cancel_event,
+            )
+            report("[日常] 检测到礼包已领取提示，已关闭提示；礼包已是领取状态，跳过重复领取")
+            report("[账号队列] 当前账号收尾完成前不会继续下一个账号")
+            return
+        time.sleep(TRANSITION_CONFIRM_POLL_INTERVAL_SECONDS)
+
+    if try_recognize(
+        tasker,
+        "日常界面已打开",
+        timeout_ms=POPUP_POLL_TIMEOUT_MS,
+        report=report,
+        cancel_event=cancel_event,
+        recover_interrupting_popup=False,
+    ):
+        report("[日常] 100 活跃礼包已是领取状态，跳过重复领取")
+        report("[账号队列] 当前账号收尾完成前不会继续下一个账号")
+        return
+    raise RuntimeError("点击 100 活跃礼包后，既未出现结果层，也未确认仍在日常页。")
+
+
 def complete_commercial_daily_group(
     tasker: Tasker,
     controller: AdbController,
@@ -2781,8 +2912,7 @@ def claim_daily_completion_and_exit(
     ):
         report("[日常] 活跃度未确认达到 100，保守停止，不退出游戏")
         return False
-    run_task(tasker, "领取日常100活跃礼包", report, cancel_event)
-    dismiss_result_overlay(tasker, controller, "日常100活跃礼包结果弹层", report, cancel_event)
+    claim_daily_100_reward(tasker, controller, report, cancel_event)
     report("[日常] 100 活跃礼包已领取")
     if not try_recognize(
         tasker,
@@ -2793,37 +2923,52 @@ def claim_daily_completion_and_exit(
         report("[退出] 奖励层关闭后未能确认日常页面，保守保留游戏运行")
         return False
     report("[日常] 已领取最右侧 100 活跃礼包并关闭奖励层，任务完全完成")
-    close_game_application(device, report)
+    if not close_game_application(device, report):
+        report("[退出] 当前账号任务已完成，但游戏未能安全关闭；不会继续下一个账号")
+        return False
     return True
 
 
 def close_game_application(device, report: Reporter = print) -> bool:
-    """仅停止当前前台游戏包，不操作模拟器窗口；无法确认时保守跳过。"""
+    """按已确认包名停止游戏并复核进程，不操作模拟器窗口。"""
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    process = subprocess.run(
-        [str(device.adb_path), "-s", device.address, "shell", "dumpsys", "window", "windows"],
+    package = os.environ.get("FASHION_MALL_PACKAGE", "").strip() or DEFAULT_GAME_PACKAGE
+    if not __import__("re").fullmatch(r"[A-Za-z][\w.]+", package):
+        report(f"[退出] 游戏包名格式无效：{package}，保留游戏运行")
+        return False
+
+    adb_prefix = [str(device.adb_path), "-s", device.address, "shell"]
+    installed = subprocess.run(
+        [*adb_prefix, "pm", "path", package],
         text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=20,
         check=False, creationflags=creation_flags,
     )
-    if process.returncode != 0:
-        report("[退出] 无法确认前台应用，保留游戏运行")
+    if installed.returncode != 0 or f"package:" not in installed.stdout:
+        report(f"[退出] 设备中未确认游戏包 {package}，保留游戏运行")
         return False
-    package = None
-    for line in process.stdout.splitlines():
-        if "mCurrentFocus" not in line and "mFocusedApp" not in line:
-            continue
-        match = __import__("re").search(r"(?:u\d+_)?([A-Za-z][\w.]+)/", line)
-        if match:
-            package = match.group(1)
+
+    stopped = subprocess.run(
+        [*adb_prefix, "am", "force-stop", package],
+        text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=20,
+        check=False, creationflags=creation_flags,
+    )
+    if stopped.returncode != 0:
+        report(f"[退出] force-stop 游戏包失败：{package}，保留游戏运行")
+        return False
+
+    for _ in range(5):
+        running = subprocess.run(
+            [*adb_prefix, "pidof", package],
+            text=True, encoding="utf-8", errors="replace", capture_output=True,
+            timeout=10, check=False, creationflags=creation_flags,
+        )
+        if running.returncode != 0 or not running.stdout.strip():
             break
-    configured_package = os.environ.get("FASHION_MALL_PACKAGE", "").strip()
-    if configured_package and package != configured_package:
-        report(f"[退出] 前台包名 {package} 与 FASHION_MALL_PACKAGE 不一致，保留游戏运行")
+        time.sleep(0.2)
+    else:
+        report(f"[退出] 游戏进程仍存在：{package}，保留游戏运行")
         return False
-    if not package or package.startswith(("com.android.", "com.google.android.", "android")):
-        report("[退出] 未确认游戏包名，保留游戏运行")
-        return False
-    run_adb_shell_from_stdin(device, f"am force-stop {package}", "关闭游戏应用")
+
     report(
         f"[退出] 已关闭游戏应用（{package}）；"
         "未关闭模拟器，自动化客户端保持打开"
@@ -3083,7 +3228,7 @@ def run_automation(
     report: Reporter = print,
     cancel_event=None,
     debug_screenshot_dir: Path | None = None,
-) -> None:
+) -> bool:
     global _ACTIVE_STEP_SCREENSHOT_RECORDER
     require_ocr_model()
     validate_credential(account, "账号")
@@ -3180,34 +3325,47 @@ def run_automation(
         report("[日常计划] 名媛会培育、商战、环球差旅、伙伴培训按本轮要求暂不执行")
         if not claim_daily_completion_and_exit(tasker, controller, device, report, cancel_event):
             report("已完成当前可执行日常流程；100 活跃礼包领取条件未确认满足，尚未完全完成。")
+            return False
         else:
             report(
                 "已领取日常 100 活跃礼包，任务已完全完成；"
                 "游戏关闭流程已执行，自动化客户端保持打开。"
             )
+            return True
     finally:
         _ACTIVE_STEP_SCREENSHOT_RECORDER = None
 
 
 def main() -> None:
-    config = load_local_config()
-    account = str(config.get("account", "")).strip()
-    password = str(config.get("password", ""))
-    try:
-        server_number = int(config.get("server_number", 1))
-    except (TypeError, ValueError):
-        server_number = 1
-
-    if account and password:
-        print(f"已从本地配置读取账号、密码和目标区号（{server_number} 区）。")
+    accounts = [item for item in load_account_configs() if item["active"]]
+    if accounts:
+        print(f"已从本地配置读取 {len(accounts)} 个启用账号。")
     else:
         print("首次运行，请输入账号密码；随后会明文保存在本地配置文件中。")
         account = input("游戏账号：").strip()
         password = getpass("游戏密码（输入时不会显示）：")
         server_number = int(input("目标区号：").strip())
         save_local_config(account, password, server_number)
+        accounts = [
+            {
+                "account": account,
+                "password": password,
+                "server_number": server_number,
+                "active": True,
+            }
+        ]
     device = choose_device()
-    run_automation(account, password, server_number=server_number, device=device)
+    for index, account_config in enumerate(accounts, start=1):
+        print(f"开始执行第 {index}/{len(accounts)} 个账号。")
+        completed = run_automation(
+            account_config["account"],
+            account_config["password"],
+            server_number=account_config["server_number"],
+            device=device,
+        )
+        if not completed:
+            print("当前账号未完全完成或游戏未安全关闭，停止后续账号。")
+            break
 
 
 if __name__ == "__main__":

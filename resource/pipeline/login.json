@@ -1013,5 +1013,21 @@
         "roi": [0, 250, 720, 900],
         "action": "DoNothing",
         "timeout": 10000
+    },
+    "日常100活跃礼包重复领取弹窗": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "^[0-9]+$", "roi": [445, 280, 180, 230]},
+            {"recognition": "OCR", "expected": "^[0-9]+$", "roi": [570, 280, 180, 230]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing",
+        "timeout": 1500
+    },
+    "关闭日常100活跃礼包重复领取弹窗": {
+        "recognition": "DirectHit",
+        "target": [610, 320],
+        "action": "Click",
+        "post_delay": 500
     }
 }

@@ -14,7 +14,7 @@ import runner
 
 
 BASE_WINDOW_WIDTH = 640
-BASE_WINDOW_HEIGHT = 560
+BASE_WINDOW_HEIGHT = 620
 MIN_WINDOW_WIDTH = 560
 MIN_WINDOW_HEIGHT = 480
 
@@ -58,10 +58,14 @@ class FashionMallClient:
         self.root.geometry(self._centered_geometry(BASE_WINDOW_WIDTH, BASE_WINDOW_HEIGHT))
         self.root.minsize(self._px(MIN_WINDOW_WIDTH), self._px(MIN_WINDOW_HEIGHT))
 
-        config = runner.load_local_config()
-        self.account = tk.StringVar(value=str(config.get("account", "")))
-        self.password = tk.StringVar(value=str(config.get("password", "")))
-        self.server_number = tk.StringVar(value=str(config.get("server_number", 1)))
+        account_configs = runner.load_account_configs()
+        if not account_configs:
+            account_configs = [
+                {"account": "", "password": "", "server_number": 1, "active": True}
+            ]
+        self.initial_account_configs = account_configs
+        self.account_rows: list[dict] = []
+        self.account_widgets: list[tk.Widget] = []
         self.show_password = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="就绪")
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -113,45 +117,73 @@ class FashionMallClient:
         outer = ttk.Frame(self.root, padding=self._px(20))
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(6, weight=1)
+        outer.rowconfigure(4, weight=1)
 
         ttk.Label(outer, text="时尚百货城自动化", font=("Microsoft YaHei UI", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, self._px(18))
         )
 
-        ttk.Label(outer, text="游戏账号").grid(
-            row=1, column=0, sticky="w", padx=(0, self._px(12)), pady=self._px(6)
-        )
-        self.account_entry = ttk.Entry(outer, textvariable=self.account)
-        self.account_entry.grid(row=1, column=1, columnspan=2, sticky="ew", pady=self._px(6))
+        accounts_frame = ttk.LabelFrame(outer, text="账号队列", padding=self._px(8))
+        accounts_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        accounts_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(outer, text="游戏密码").grid(
-            row=2, column=0, sticky="w", padx=(0, self._px(12)), pady=self._px(6)
+        account_toolbar = ttk.Frame(accounts_frame)
+        account_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, self._px(6)))
+        account_toolbar.columnconfigure(0, weight=1)
+        ttk.Label(account_toolbar, text="按顺序执行所有勾选“使用”的账号").grid(
+            row=0, column=0, sticky="w"
         )
-        self.password_entry = ttk.Entry(outer, textvariable=self.password, show="•")
-        self.password_entry.grid(row=2, column=1, sticky="ew", pady=self._px(6))
-        ttk.Checkbutton(
-            outer,
-            text="显示",
+        show_button = ttk.Checkbutton(
+            account_toolbar,
+            text="显示密码",
             variable=self.show_password,
             command=self._toggle_password,
-        ).grid(row=2, column=2, sticky="e", padx=(self._px(10), 0))
+        )
+        show_button.grid(row=0, column=1, padx=self._px(8))
+        add_button = ttk.Button(
+            account_toolbar,
+            text="＋ 添加账号",
+            command=self._add_account_row,
+        )
+        add_button.grid(row=0, column=2, sticky="e")
+        self.account_widgets.extend((show_button, add_button))
 
-        ttk.Label(outer, text="目标区号").grid(
-            row=3, column=0, sticky="w", padx=(0, self._px(12)), pady=self._px(6)
+        list_frame = ttk.Frame(accounts_frame)
+        list_frame.grid(row=1, column=0, sticky="ew")
+        list_frame.columnconfigure(0, weight=1)
+        self.accounts_canvas = tk.Canvas(
+            list_frame,
+            height=self._px(150),
+            highlightthickness=0,
         )
-        self.server_entry = ttk.Spinbox(
-            outer,
-            from_=1,
-            to=999,
-            textvariable=self.server_number,
-            width=12,
+        self.accounts_canvas.grid(row=0, column=0, sticky="ew")
+        accounts_scrollbar = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self.accounts_canvas.yview
         )
-        self.server_entry.grid(row=3, column=1, columnspan=2, sticky="w", pady=self._px(6))
+        accounts_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.accounts_canvas.configure(yscrollcommand=accounts_scrollbar.set)
+        self.accounts_container = ttk.Frame(self.accounts_canvas)
+        self.accounts_window = self.accounts_canvas.create_window(
+            (0, 0), window=self.accounts_container, anchor="nw"
+        )
+        self.accounts_container.bind("<Configure>", self._refresh_accounts_scrollregion)
+        self.accounts_canvas.bind("<Configure>", self._resize_accounts_container)
+        account_header = ttk.Frame(self.accounts_container)
+        account_header.pack(fill="x", pady=(0, self._px(2)))
+        account_header.columnconfigure(1, weight=3)
+        account_header.columnconfigure(2, weight=3)
+        ttk.Label(account_header, text="#", width=3).grid(row=0, column=0)
+        ttk.Label(account_header, text="游戏账号").grid(row=0, column=1, sticky="w", padx=self._px(3))
+        ttk.Label(account_header, text="游戏密码").grid(row=0, column=2, sticky="w", padx=self._px(3))
+        ttk.Label(account_header, text="区号", width=6).grid(row=0, column=3, padx=self._px(3))
+        ttk.Label(account_header, text="启用", width=5).grid(row=0, column=4, padx=self._px(3))
+        ttk.Label(account_header, text="操作", width=5).grid(row=0, column=5)
+        for account_config in self.initial_account_configs:
+            self._add_account_row(account_config)
 
         controls = ttk.Frame(outer)
         controls.grid(
-            row=4,
+            row=2,
             column=0,
             columnspan=3,
             sticky="ew",
@@ -168,11 +200,11 @@ class FashionMallClient:
         self.clear_button.grid(row=0, column=2, sticky="ew", padx=(self._px(6), 0))
 
         ttk.Label(outer, textvariable=self.status, foreground="#2563eb").grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(0, self._px(8))
+            row=3, column=0, columnspan=3, sticky="w", pady=(0, self._px(8))
         )
 
         log_frame = ttk.LabelFrame(outer, text="运行状态", padding=self._px(8))
-        log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=4, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 10))
@@ -185,13 +217,121 @@ class FashionMallClient:
             outer,
             text="账号、密码和区号会明文保存在 runtime/config/client_config.json。",
             foreground="#666666",
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
 
-        self.account_entry.focus_set()
+        self.account_rows[0]["account_entry"].focus_set()
         self.root.bind("<Return>", lambda _event: self._start())
 
     def _toggle_password(self) -> None:
-        self.password_entry.configure(show="" if self.show_password.get() else "•")
+        show = "" if self.show_password.get() else "•"
+        for row in self.account_rows:
+            row["password_entry"].configure(show=show)
+
+    def _refresh_accounts_scrollregion(self, _event=None) -> None:
+        self.accounts_canvas.configure(scrollregion=self.accounts_canvas.bbox("all"))
+
+    def _resize_accounts_container(self, event) -> None:
+        self.accounts_canvas.itemconfigure(self.accounts_window, width=event.width)
+
+    def _add_account_row(self, values: dict | None = None) -> None:
+        values = values or {}
+        row_frame = ttk.Frame(self.accounts_container)
+        row_frame.pack(fill="x", pady=self._px(3))
+        row_frame.columnconfigure(1, weight=3)
+        row_frame.columnconfigure(2, weight=3)
+
+        account_var = tk.StringVar(value=str(values.get("account", "")))
+        password_var = tk.StringVar(value=str(values.get("password", "")))
+        server_var = tk.StringVar(value=str(values.get("server_number", 1)))
+        active_var = tk.BooleanVar(value=bool(values.get("active", True)))
+
+        number_label = ttk.Label(row_frame, text=str(len(self.account_rows) + 1), width=3)
+        number_label.grid(row=0, column=0, padx=(0, self._px(4)))
+        account_entry = ttk.Entry(row_frame, textvariable=account_var)
+        account_entry.grid(row=0, column=1, sticky="ew", padx=self._px(3))
+        password_entry = ttk.Entry(
+            row_frame,
+            textvariable=password_var,
+            show="" if self.show_password.get() else "•",
+        )
+        password_entry.grid(row=0, column=2, sticky="ew", padx=self._px(3))
+        server_entry = ttk.Spinbox(
+            row_frame, from_=1, to=999, textvariable=server_var, width=6
+        )
+        server_entry.grid(row=0, column=3, padx=self._px(3))
+        active_button = ttk.Checkbutton(row_frame, text="使用", variable=active_var)
+        active_button.grid(row=0, column=4, padx=self._px(3))
+        remove_button = ttk.Button(
+            row_frame,
+            text="删除",
+            width=5,
+            command=lambda frame=row_frame: self._remove_account_row(frame),
+        )
+        remove_button.grid(row=0, column=5, padx=(self._px(3), 0))
+
+        row = {
+            "frame": row_frame,
+            "number_label": number_label,
+            "account": account_var,
+            "password": password_var,
+            "server_number": server_var,
+            "active": active_var,
+            "account_entry": account_entry,
+            "password_entry": password_entry,
+        }
+        self.account_rows.append(row)
+        self.account_widgets.extend(
+            (account_entry, password_entry, server_entry, active_button, remove_button)
+        )
+        self.root.after_idle(self._scroll_accounts_to_bottom)
+
+    def _scroll_accounts_to_bottom(self) -> None:
+        self._refresh_accounts_scrollregion()
+        self.accounts_canvas.yview_moveto(1.0)
+
+    def _remove_account_row(self, frame: ttk.Frame) -> None:
+        if len(self.account_rows) == 1:
+            messagebox.showinfo("至少保留一个账号", "账号列表中至少需要保留一行。", parent=self.root)
+            return
+        removed = next(row for row in self.account_rows if row["frame"] is frame)
+        self.account_rows.remove(removed)
+        for widget in frame.winfo_children():
+            if widget in self.account_widgets:
+                self.account_widgets.remove(widget)
+        frame.destroy()
+        for index, row in enumerate(self.account_rows, start=1):
+            row["number_label"].configure(text=str(index))
+
+    def _collect_accounts(self) -> list[dict]:
+        accounts = []
+        for index, row in enumerate(self.account_rows, start=1):
+            account = row["account"].get().strip()
+            password = row["password"].get()
+            try:
+                server_number = int(row["server_number"].get().strip())
+                runner.validate_credential(account, f"第 {index} 个账号")
+                runner.validate_credential(password, f"第 {index} 个密码")
+                runner.validate_server_number(server_number)
+            except ValueError as error:
+                raise RuntimeError(f"第 {index} 个账号的区号必须是整数。") from error
+            accounts.append(
+                {
+                    "account": account,
+                    "password": password,
+                    "server_number": server_number,
+                    "active": bool(row["active"].get()),
+                }
+            )
+        if not any(item["active"] for item in accounts):
+            raise RuntimeError("请至少勾选一个要使用的账号。")
+        return accounts
+
+    def _set_account_controls_state(self, state: str) -> None:
+        for widget in self.account_widgets:
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
 
     def _write_session_log(self, message: str) -> None:
         timestamp = datetime.now().isoformat(timespec="milliseconds")
@@ -223,41 +363,31 @@ class FashionMallClient:
         if self.worker is not None and self.worker.is_alive():
             return
 
-        config = runner.load_local_config()
-        account = self.account.get().strip() or str(config.get("account", "")).strip()
-        password = self.password.get() or str(config.get("password", ""))
         try:
-            server_value = self.server_number.get().strip() or str(config.get("server_number", 1))
-            server_number = int(server_value)
-            runner.validate_credential(account, "账号")
-            runner.validate_credential(password, "密码")
-            runner.validate_server_number(server_number)
-        except (RuntimeError, ValueError) as error:
-            if isinstance(error, ValueError):
-                error = RuntimeError("区号必须是整数。")
+            accounts = self._collect_accounts()
+        except RuntimeError as error:
             messagebox.showerror("输入有误", str(error), parent=self.root)
             return
 
         try:
-            runner.save_local_config(account, password, server_number)
-        except OSError as error:
+            runner.save_account_configs(accounts)
+        except (OSError, RuntimeError, ValueError) as error:
             messagebox.showerror("保存失败", f"无法写入本地配置：{error}", parent=self.root)
             return
 
-        self.account.set(account)
-        self.server_number.set(str(server_number))
-        self.password.set("")
-        self.show_password.set(False)
-        self._toggle_password()
+        active_accounts = [item for item in accounts if item["active"]]
         self.cancel_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
+        self._set_account_controls_state("disabled")
         self.status.set("正在运行")
-        self._append_log("开始运行，正在查找 MuMu 模拟器……")
+        self._append_log(
+            f"开始运行，共有 {len(active_accounts)} 个已启用账号，正在查找 MuMu 模拟器……"
+        )
 
         self.worker = threading.Thread(
             target=self._run_worker,
-            args=(account, password, server_number, self.cancel_event),
+            args=(active_accounts, self.cancel_event),
             daemon=True,
         )
         self.worker.start()
@@ -274,35 +404,48 @@ class FashionMallClient:
         except OSError as error:
             messagebox.showerror("删除失败", str(error), parent=self.root)
             return
-        self.account.set("")
-        self.password.set("")
-        self.server_number.set("1")
+        for row in list(self.account_rows):
+            row["frame"].destroy()
+        self.account_rows.clear()
+        self.account_widgets = self.account_widgets[:2]
+        self._add_account_row()
         self._append_log("本地账号配置已删除。")
 
     def _run_worker(
         self,
-        account: str,
-        password: str,
-        server_number: int,
+        accounts: list[dict],
         cancel_event: threading.Event,
     ) -> None:
         try:
-            runner.run_automation(
-                account,
-                password,
-                server_number=server_number,
-                report=self._report,
-                cancel_event=cancel_event,
-                debug_screenshot_dir=self.debug_screenshot_dir,
-            )
+            total = len(accounts)
+            for index, account_config in enumerate(accounts, start=1):
+                runner.ensure_not_cancelled(cancel_event)
+                self._report(
+                    f"[账号队列] 开始执行第 {index}/{total} 个账号（{account_config['server_number']} 区）"
+                )
+                completed = runner.run_automation(
+                    account_config["account"],
+                    account_config["password"],
+                    server_number=account_config["server_number"],
+                    report=self._report,
+                    cancel_event=cancel_event,
+                    debug_screenshot_dir=self.debug_screenshot_dir / f"account-{index}",
+                )
+                if not completed:
+                    self._emit(
+                        "incomplete",
+                        f"第 {index}/{total} 个账号未能完成“领取 100 活跃礼包并关闭游戏”的完整条件，账号队列已停止。",
+                    )
+                    return
+                self._report(f"[账号队列] 第 {index}/{total} 个账号已完成，游戏已关闭")
+                if index < total:
+                    self._report("[账号队列] 即将重新打开游戏并执行下一个账号")
         except runner.AutomationCancelled as error:
             self._emit("cancelled", str(error))
         except Exception as error:
             self._emit("error", str(error))
         else:
-            self._emit("done", "自动化流程已完成。")
-        finally:
-            password = ""
+            self._emit("done", f"账号队列已完成，共执行 {len(accounts)} 个账号。")
 
     def _stop(self) -> None:
         if self.cancel_event is None:
@@ -317,6 +460,7 @@ class FashionMallClient:
         self._append_log(message)
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
+        self._set_account_controls_state("normal")
         self.cancel_event = None
 
     def _drain_events(self) -> None:
@@ -329,6 +473,9 @@ class FashionMallClient:
                     self._finish("已完成", message)
                 elif kind == "cancelled":
                     self._finish("已停止", message)
+                elif kind == "incomplete":
+                    self._finish("未完全完成", message)
+                    messagebox.showwarning("账号队列已停止", message, parent=self.root)
                 elif kind == "error":
                     self._finish("运行失败", f"执行失败：{message}")
                     messagebox.showerror("运行失败", message, parent=self.root)

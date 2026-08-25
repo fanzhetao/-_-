@@ -12,6 +12,7 @@ from runner import (
     DAILY_STATE_TODO,
     DailyOcrText,
     claim_daily_completion_and_exit,
+    claim_daily_100_reward,
     classify_daily_viewport,
     click_bottom_commercial_street,
     complete_artist_daily_group,
@@ -158,9 +159,9 @@ class DailyCompletionTests(unittest.TestCase):
     @patch("runner.close_game_application", return_value=False)
     @patch("runner.dismiss_result_overlay")
     @patch("runner.run_task")
-    @patch("runner.try_recognize", side_effect=[True, True])
+    @patch("runner.try_recognize", side_effect=[True, True, True])
     @patch("runner.claim_all_daily_rewards")
-    def test_claimed_100_gift_is_complete_even_if_game_cannot_be_closed(
+    def test_does_not_continue_account_queue_if_game_cannot_be_closed(
         self,
         claim_all_daily_rewards,
         try_recognize,
@@ -177,7 +178,7 @@ class DailyCompletionTests(unittest.TestCase):
             tasker, controller, device, report=reports.append
         )
 
-        self.assertTrue(completed)
+        self.assertFalse(completed)
         run_task.assert_called_once_with(
             tasker, "领取日常100活跃礼包", reports.append, None
         )
@@ -190,6 +191,31 @@ class DailyCompletionTests(unittest.TestCase):
         )
         close_game_application.assert_called_once_with(device, reports.append)
         self.assertTrue(any("任务完全完成" in line for line in reports))
+
+    @patch("runner.time.sleep")
+    @patch("runner.time.monotonic", side_effect=[0.0, 0.0, 5.1])
+    @patch("runner.run_task")
+    @patch("runner.try_recognize", side_effect=[False, True])
+    @patch("runner.dismiss_result_overlay")
+    def test_already_claimed_100_gift_skips_result_overlay(
+        self,
+        dismiss_result_overlay,
+        try_recognize,
+        run_task,
+        monotonic,
+        sleep,
+    ) -> None:
+        reports: list[str] = []
+
+        claim_daily_100_reward(object(), object(), report=reports.append)
+
+        self.assertEqual(run_task.call_count, 2)
+        self.assertEqual(
+            run_task.call_args_list[1].args[1],
+            "关闭日常100活跃礼包重复领取弹窗",
+        )
+        self.assertTrue(any("已是领取状态" in line for line in reports))
+        self.assertTrue(any("不会继续下一个账号" in line for line in reports))
 
 
 class DailyForwardPipelineTests(unittest.TestCase):
@@ -360,6 +386,15 @@ class DailyForwardPipelineTests(unittest.TestCase):
         self.assertEqual(entry["recognition"], "DirectHit")
         self.assertEqual(entry["target"], [610, 320])
         self.assertEqual(entry["post_delay"], 1500)
+
+    def test_duplicate_100_reward_popup_uses_two_amount_anchors(self) -> None:
+        entry = self.pipeline["日常100活跃礼包重复领取弹窗"]
+
+        self.assertEqual(entry["recognition"], "And")
+        self.assertEqual(
+            [item["expected"] for item in entry["all_of"]],
+            ["^[0-9]+$", "^[0-9]+$"],
+        )
 
     def test_guided_lucky_draw_fallback_has_fixed_target(self) -> None:
         entry = self.pipeline["点击日常定位的幸运扭蛋入口"]
