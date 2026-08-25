@@ -85,6 +85,7 @@ DAILY_TASK_SEEK_SWIPES = 20
 DAILY_TASK_REWIND_SWIPES = 8
 DAILY_INVENTORY_MAX_SWIPES = 20
 DAILY_TASK_ROW_Y_TOLERANCE = 85
+DAILY_FORWARD_POST_CLICK_SECONDS = 2.0
 DAILY_STATE_TODO = "待完成"
 DAILY_STATE_CLAIMABLE = "可领取"
 DAILY_STATE_CLAIMED = "已领取"
@@ -95,6 +96,7 @@ FACTORY_STATE_RECOGNITION_TIMEOUT_MS = 2000
 FACTORY_STATE_SETTLE_SECONDS = 0.8
 FACTORY_ACQUISITION_TIMEOUT_SECONDS = 30.0
 FACTORY_ACQUISITION_POLL_SECONDS = 0.25
+FACTORY_AUTO_RESEARCH_FIXED_CENTER = (85, 699)
 FACTORY_AUTO_RESEARCH_CHECK_OFFSET_X = 13
 FACTORY_AUTO_RESEARCH_INNER_RADIUS = 6
 FACTORY_AUTO_RESEARCH_GREEN_COUNT = 5
@@ -102,7 +104,7 @@ DEPARTMENT_STORE_VERTICAL_VIEWPORTS = 8
 DEPARTMENT_STORE_HORIZONTAL_VIEWPORTS = 3
 DEPARTMENT_STORE_VERTICAL_REWIND_SWIPES = 6
 DEPARTMENT_STORE_HORIZONTAL_REWIND_SWIPES = 3
-DAILY_ACTION_RETRIES = 3
+DAILY_ACTION_RETRIES = 4
 DAILY_TRANSITION_CHECKS = 3
 DAILY_DESTINATION_TIMEOUT_MS = 2000
 DAILY_SOURCE_PAGE_TIMEOUT_MS = 1000
@@ -1600,6 +1602,45 @@ def classify_daily_viewport(
     return found
 
 
+def daily_forward_button_center(
+    ocr_texts: list[DailyOcrText],
+    task_label: str,
+) -> tuple[int, int] | None:
+    """返回与目标任务标题纵向最接近的同行“前往”文本框中心。"""
+    normalized_label = _normalize_daily_ocr_text(task_label)
+    titles = [item for item in ocr_texts if normalized_label in item.text]
+    forwards = [
+        item
+        for item in ocr_texts
+        if "前往" in item.text and item.box[0] + item.box[2] / 2 >= 480
+    ]
+    best_match: tuple[float, DailyOcrText] | None = None
+    for title in titles:
+        _, title_y, _, title_height = title.box
+        title_center_y = title_y + title_height / 2
+        for forward in forwards:
+            _, forward_y, _, forward_height = forward.box
+            forward_center_y = forward_y + forward_height / 2
+            distance = abs(title_center_y - forward_center_y)
+            if distance > DAILY_TASK_ROW_Y_TOLERANCE:
+                continue
+            if best_match is None or distance < best_match[0]:
+                best_match = (distance, forward)
+
+    if best_match is None:
+        return None
+    x, y, width, height = best_match[1].box
+    return x + width // 2, y + height // 2
+
+
+def daily_task_label_for_entry(entry: str) -> str | None:
+    """根据日常“前往”节点名取得对应任务标题。"""
+    for spec in DAILY_TASK_SPECS:
+        if spec.forward_entry == entry:
+            return spec.label
+    return None
+
+
 def inventory_daily_tasks(
     tasker: Tasker,
     controller: AdbController,
@@ -1732,8 +1773,32 @@ def run_daily_forward(
         raise RuntimeError(f"日常列表中未找到任务入口：{entry}")
 
     total_attempts = DAILY_ACTION_RETRIES + 1
+    task_label = daily_task_label_for_entry(entry)
     for attempt in range(1, total_attempts + 1):
-        run_task(tasker, entry, report, cancel_event)
+        ensure_not_cancelled(cancel_event)
+        forward_center = None
+        if task_label is not None:
+            forward_center = daily_forward_button_center(
+                collect_daily_viewport_ocr(tasker),
+                task_label,
+            )
+        if forward_center is not None:
+            report(
+                f"[日常前往] 已定位同行“前往”文本框中心 {forward_center}；"
+                f"点击 {attempt}/{total_attempts}"
+            )
+            wait_job(
+                controller.post_click(*forward_center),
+                f"点击{task_label}同行前往中心",
+            )
+            time.sleep(DAILY_FORWARD_POST_CLICK_SECONDS)
+            capture_debug_step(f"完成：点击{task_label}同行前往中心")
+        else:
+            report(
+                f"[日常前往] 本轮未取得{task_label or entry}同行“前往”中心；"
+                "回退到原相对偏移点击"
+            )
+            run_task(tasker, entry, report, cancel_event)
         stayed_on_daily = False
         for transition_check in range(1, DAILY_TRANSITION_CHECKS + 1):
             time.sleep(0.5)
@@ -1796,14 +1861,26 @@ def run_daily_forward(
     )
 
 
-def click_bottom_department_store(
+def click_bottom_commercial_street(
     tasker: Tasker,
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
+    if try_recognize(
+        tasker,
+        "点击商业街返回主页",
+        timeout_ms=1500,
+        report=report,
+        cancel_event=cancel_event,
+    ):
+        action_entry = "点击商业街返回主页"
+        report("[返回主页] OCR 已识别“商业街”，点击文字框中心")
+    else:
+        action_entry = "点击商业街返回主页固定位置"
+        report("[返回主页] OCR 未识别“商业街”，使用固定坐标 (200, 1215) 兜底")
     run_confirmed_transition(
         tasker,
-        "点击百货返回主页",
+        action_entry,
         "主界面已到达",
         report,
         cancel_event,
@@ -2108,8 +2185,17 @@ def factory_auto_research_selection(
 ) -> tuple[bool, int, tuple[int, int]]:
     """根据“自动研发”左侧圆框中央是否存在绿色勾判断选中状态。"""
     x, y, _width, height = text_box
-    center_x = x - FACTORY_AUTO_RESEARCH_CHECK_OFFSET_X
-    center_y = y + height // 2
+    center = (x - FACTORY_AUTO_RESEARCH_CHECK_OFFSET_X, y + height // 2)
+    selected, green_count = factory_auto_research_selection_at_center(image, center)
+    return selected, green_count, center
+
+
+def factory_auto_research_selection_at_center(
+    image: np.ndarray,
+    center: tuple[int, int],
+) -> tuple[bool, int]:
+    """检测指定勾选框中心的小范围内是否存在绿色勾。"""
+    center_x, center_y = center
     radius = FACTORY_AUTO_RESEARCH_INNER_RADIUS
     image_height, image_width = image.shape[:2]
     left = max(0, center_x - radius)
@@ -2118,7 +2204,7 @@ def factory_auto_research_selection(
     bottom = min(image_height, center_y + radius + 1)
     roi = image[top:bottom, left:right]
     if roi.size == 0 or roi.ndim < 3 or roi.shape[2] < 3:
-        return False, 0, (center_x, center_y)
+        return False, 0
 
     channel_0 = roi[:, :, 0].astype(np.int16)
     green = roi[:, :, 1].astype(np.int16)
@@ -2129,11 +2215,55 @@ def factory_auto_research_selection(
         & (green >= channel_2 + 20)
     )
     green_count = int(green_pixels.sum())
-    return (
-        green_count >= FACTORY_AUTO_RESEARCH_GREEN_COUNT,
-        green_count,
-        (center_x, center_y),
+    return green_count >= FACTORY_AUTO_RESEARCH_GREEN_COUNT, green_count
+
+
+def detect_factory_auto_research_selection(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+) -> tuple[bool, int, tuple[int, int], str]:
+    """固定位置优先检测绿色勾，未命中时用文字定位结果兜底。"""
+    image = capture_screen(controller)
+    fixed_selected, fixed_count = factory_auto_research_selection_at_center(
+        image,
+        FACTORY_AUTO_RESEARCH_FIXED_CENTER,
     )
+    report(
+        "[关卡工厂选项] 固定勾选框检测="
+        f"{'已选中' if fixed_selected else '未检测到绿色勾'}；"
+        f"绿色中心像素={fixed_count}；"
+        f"勾选框中心={FACTORY_AUTO_RESEARCH_FIXED_CENTER}"
+    )
+    if fixed_selected:
+        return (
+            True,
+            fixed_count,
+            FACTORY_AUTO_RESEARCH_FIXED_CENTER,
+            "固定坐标",
+        )
+
+    text_box = find_recognition_box(tasker, "自动研发文字")
+    if text_box is None:
+        report(
+            "[关卡工厂选项] OCR 兜底未定位“自动研发”；"
+            "按固定勾选框未检测到绿色勾处理"
+        )
+        return (
+            False,
+            fixed_count,
+            FACTORY_AUTO_RESEARCH_FIXED_CENTER,
+            "固定坐标（OCR 未命中）",
+        )
+
+    selected, green_count, center = factory_auto_research_selection(image, text_box)
+    report(
+        "[关卡工厂选项] OCR 兜底勾选框检测="
+        f"{'已选中' if selected else '未选中'}；"
+        f"绿色中心像素={green_count}；勾选框中心={center}；"
+        f"文字框={text_box}"
+    )
+    return selected, green_count, center, "OCR 文字定位"
 
 
 def ensure_factory_auto_research_unselected(
@@ -2144,17 +2274,15 @@ def ensure_factory_auto_research_unselected(
 ) -> None:
     """仅在绿色勾明确存在时取消自动研发，并复核为未选中。"""
     ensure_not_cancelled(cancel_event)
-    text_box = find_recognition_box(tasker, "自动研发文字")
-    if text_box is None:
-        capture_debug_step("未识别自动研发文字")
-        raise RuntimeError("已检测到研发按钮，但未能定位“自动研发”选项。")
-
-    image = capture_screen(controller)
-    selected, green_count, center = factory_auto_research_selection(image, text_box)
+    selected, green_count, center, source = detect_factory_auto_research_selection(
+        tasker,
+        controller,
+        report,
+    )
     report(
         "[关卡工厂选项] 自动研发初始状态="
         f"{'已选中' if selected else '未选中'}；"
-        f"绿色中心像素={green_count}；勾选框中心={center}"
+        f"绿色中心像素={green_count}；勾选框中心={center}；来源={source}"
     )
     if not selected:
         capture_debug_step("自动研发已确认未选中")
@@ -2165,16 +2293,14 @@ def ensure_factory_auto_research_unselected(
     time.sleep(CHECKBOX_CONFIRM_INTERVAL_SECONDS)
     ensure_not_cancelled(cancel_event)
 
-    refreshed_box = find_recognition_box(tasker, "自动研发文字") or text_box
-    refreshed_image = capture_screen(controller)
-    still_selected, refreshed_count, refreshed_center = factory_auto_research_selection(
-        refreshed_image,
-        refreshed_box,
+    still_selected, refreshed_count, refreshed_center, refreshed_source = (
+        detect_factory_auto_research_selection(tasker, controller, report)
     )
     report(
         "[关卡工厂选项] 取消后复核状态="
         f"{'仍为已选中' if still_selected else '已取消'}；"
-        f"绿色中心像素={refreshed_count}；勾选框中心={refreshed_center}"
+        f"绿色中心像素={refreshed_count}；"
+        f"勾选框中心={refreshed_center}；来源={refreshed_source}"
     )
     if still_selected:
         capture_debug_step("自动研发取消后仍为选中")
@@ -2493,7 +2619,7 @@ def complete_commercial_daily_group(
         report("[日常计划] 已执行：私人会馆商店兑换1次商品")
 
     if at_department_store:
-        click_bottom_department_store(tasker, report, cancel_event)
+        click_bottom_commercial_street(tasker, report, cancel_event)
         return_to_daily(tasker, report, cancel_event)
 
 
@@ -2532,7 +2658,7 @@ def complete_artist_daily_group(
         report,
         cancel_event,
     )
-    click_bottom_department_store(tasker, report, cancel_event)
+    click_bottom_commercial_street(tasker, report, cancel_event)
     return_to_daily(tasker, report, cancel_event)
 
 
@@ -2615,7 +2741,7 @@ def complete_partner_daily_group(
         report,
         cancel_event,
     )
-    click_bottom_department_store(tasker, report, cancel_event)
+    click_bottom_commercial_street(tasker, report, cancel_event)
     return_to_daily(tasker, report, cancel_event)
 
 
@@ -2710,7 +2836,7 @@ def complete_factory_research_daily(
     )
     complete_factory_research_actions(tasker, controller, report, cancel_event)
 
-    click_bottom_department_store(tasker, report, cancel_event)
+    click_bottom_commercial_street(tasker, report, cancel_event)
     run_confirmed_transition(
         tasker,
         "点击日常",

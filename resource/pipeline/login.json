@@ -487,10 +487,16 @@
         "action": "DoNothing",
         "timeout": 1500
     },
-    "点击百货返回主页": {
+    "点击商业街返回主页": {
         "recognition": "OCR",
-        "expected": "^百货$",
-        "roi": [0, 1100, 180, 180],
+        "expected": "^商业街$",
+        "roi": [100, 1080, 220, 200],
+        "action": "Click",
+        "post_delay": 1200
+    },
+    "点击商业街返回主页固定位置": {
+        "recognition": "DirectHit",
+        "target": [200, 1215],
         "action": "Click",
         "post_delay": 1200
     },
