@@ -1,5 +1,7 @@
 # 时尚百货城自动化
 
+当前发布版本：**1.0.0**（2026-08-25）。版本变化见 [`CHANGELOG.md`](./CHANGELOG.md)。
+
 基于 [MaaFramework](https://github.com/MaaXYZ/MaaFramework) 的 Windows 桌面自动化项目，通过 MuMu 模拟器的 ADB 接口完成《时尚百货城》的登录、弹窗处理和部分日常任务。
 
 项目提供 Tkinter 桌面客户端，也支持直接从命令行运行。自动化流程以 OCR、颜色识别、固定坐标和跳转确认共同驱动；页面状态不明确时会停止操作，避免继续点击或消费资源。
@@ -52,7 +54,7 @@
 
 ### 便携版（推荐）
 
-解压 `FashionMallAutomation-Windows-x64.zip`，启动 MuMu 模拟器后双击 `FashionMallClient.exe`。便携版已经包含 Python、MaaFramework、OCR 模型及所需原生库，不需要安装 Python 包。
+解压 `FashionMallAutomation-v1.0.0-Windows-x64.zip`，启动 MuMu 模拟器后双击 `FashionMallClient.exe`。便携版已经包含 Python、MaaFramework、OCR 模型及所需原生库，不需要安装 Python 包。可使用同目录的 `FashionMallAutomation-v1.0.0-Windows-x64.sha256` 校验下载文件。
 
 客户端桌面界面支持 1920×1080、2560×1440 和 3840×2160，并会结合 Windows DPI 自动调整窗口、字体和间距。
 
@@ -70,11 +72,21 @@ py -3.13 -m venv .venv
 
 ### 构建 Windows 便携版
 
+双击 `发布便携版.bat`，或在 PowerShell 中执行：
+
 ```powershell
 .\build_portable.ps1
 ```
 
-脚本会安装打包依赖、生成 `dist/FashionMallAutomation/`，执行原生库与 OCR 资源自检，并输出 `release/FashionMallAutomation-Windows-x64.zip`。
+脚本会自动完成版本与文档一致性检查、Python 编译检查、全部单元测试、依赖准备、PyInstaller 构建、便携版自检、压缩、敏感文件审计和 SHA-256 复核。任一步失败都会停止，不会把失败结果当作可发布版本。成功后会在 `release/` 输出带版本号的 ZIP 和校验文件。
+
+### 运行测试
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
+
+测试仅保留在维护者本机，不由 Git 跟踪，也不会复制进便携版或远程源码仓库。
 
 确认 OCR 模型文件已经放入 `resource/model/ocr/`，启动 MuMu 模拟器并保持在桌面或游戏登录页，然后双击：
 
@@ -140,14 +152,18 @@ runtime/config/client_config.json
 
 ```text
 FashionMallAutomation/
+├─ VERSION                           # 发布版本号的唯一来源
+├─ CHANGELOG.md                      # 版本更新记录
 ├─ client.py                         # Tkinter 桌面客户端与会话日志
 ├─ runner.py                         # 自动化流程、重试、页面确认和截图
 ├─ requirements.txt                  # MaaFramework Python 依赖范围
 ├─ requirements-build.txt            # PyInstaller 打包依赖
 ├─ FashionMallClient.spec            # Windows 便携版收集规则
-├─ build_portable.ps1                # 一键构建和压缩脚本
+├─ build_portable.ps1                # 一键测试、构建、自检与发布审计
+├─ 发布便携版.bat                    # 可双击的一键发布入口
 ├─ 启动客户端.bat                    # Windows 桌面客户端入口
 ├─ 使用说明.md                       # 详细行为、坐标和安全说明
+├─ tests/                            # 仅本机保留的单元测试（不上传、不发布）
 ├─ resource/
 │  ├─ default_pipeline.json          # MaaFramework 默认节点参数
 │  ├─ pipeline/login.json            # OCR、颜色识别、点击与页面节点

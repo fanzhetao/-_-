@@ -13,6 +13,7 @@ from tkinter import messagebox, ttk
 import runner
 
 
+APP_VERSION = (runner.BUNDLE_DIR / "VERSION").read_text(encoding="utf-8").strip()
 BASE_WINDOW_WIDTH = 640
 BASE_WINDOW_HEIGHT = 620
 MIN_WINDOW_WIDTH = 560
@@ -53,7 +54,7 @@ def enable_windows_dpi_awareness() -> None:
 class FashionMallClient:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("时尚百货城自动化")
+        self.root.title(f"时尚百货城自动化 v{APP_VERSION}")
         self.ui_scale = self._configure_display_scaling()
         self.root.geometry(self._centered_geometry(BASE_WINDOW_WIDTH, BASE_WINDOW_HEIGHT))
         self.root.minsize(self._px(MIN_WINDOW_WIDTH), self._px(MIN_WINDOW_HEIGHT))
@@ -119,7 +120,11 @@ class FashionMallClient:
         outer.columnconfigure(1, weight=1)
         outer.rowconfigure(4, weight=1)
 
-        ttk.Label(outer, text="时尚百货城自动化", font=("Microsoft YaHei UI", 18, "bold")).grid(
+        ttk.Label(
+            outer,
+            text=f"时尚百货城自动化 v{APP_VERSION}",
+            font=("Microsoft YaHei UI", 18, "bold"),
+        ).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, self._px(18))
         )
 

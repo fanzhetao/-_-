@@ -11,6 +11,7 @@ a = Analysis(
     binaries=maa_binaries,
     datas=maa_datas
     + [
+        ("VERSION", "."),
         ("resource", "resource"),
     ],
     hiddenimports=maa_hiddenimports,
