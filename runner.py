@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from getpass import getpass
 import json
 import os
 from pathlib import Path
+import random
+import re
 import shlex
 import shutil
 import subprocess
@@ -50,6 +53,24 @@ INTERRUPTING_POPUP_MAX_CONSECUTIVE_ROUNDS = 30
 INTERRUPTING_POPUP_CHECKBOX_SETTLE_SECONDS = 1.0
 INTERRUPTING_POPUP_CLOSE_SETTLE_SECONDS = 1.0
 INTERRUPTING_POPUP_CLOSE_ATTEMPTS = 3
+INTERRUPTING_POPUP_ENTRIES = {
+    "商战冠军点击任意处弹窗",
+    "本次登录不再提示弹窗",
+    "任意活动稍后再去弹窗",
+}
+UNKNOWN_POPUP_FALLBACK_ROUNDS = 3
+UNKNOWN_POPUP_CLICK_X_RANGE = (240, 480)
+UNKNOWN_POPUP_CLICK_Y_RANGE = (350, 700)
+UNKNOWN_POPUP_CLICK_SETTLE_SECONDS = 0.75
+UNKNOWN_POPUP_FALLBACK_EXCLUDED_ENTRIES = {"打开游戏到登录页"}
+MAIN_SCREEN_ANCHORS = (
+    ("主界面锚点百货", "左下“百货”"),
+    ("主界面锚点关卡伙伴", "底部“关卡/伙伴”"),
+    ("主界面锚点影视城背包", "底部“影视城/背包”"),
+)
+MAIN_SCREEN_REQUIRED_ANCHORS = 2
+MAIN_SCREEN_INITIAL_CHECK_ROUNDS = 3
+MAIN_SCREEN_CHECK_INTERVAL_SECONDS = 0.5
 CHECKBOX_CONFIRM_TIMEOUT_SECONDS = 3.0
 CHECKBOX_CONFIRM_INTERVAL_SECONDS = 0.25
 DO_NOT_REMIND_CHECKBOX = (278, 1122)
@@ -60,6 +81,21 @@ SERVER_LIST_MAX_SWIPES = 24
 DAILY_LIST_MAX_SWIPES = 20
 DAILY_TASK_SEEK_SWIPES = 20
 DAILY_TASK_REWIND_SWIPES = 8
+DAILY_INVENTORY_MAX_SWIPES = 20
+DAILY_TASK_ROW_Y_TOLERANCE = 85
+DAILY_STATE_TODO = "待完成"
+DAILY_STATE_CLAIMABLE = "可领取"
+DAILY_STATE_CLAIMED = "已领取"
+DAILY_STATE_UNKNOWN = "未识别"
+FACTORY_RESEARCH_TARGET_COUNT = 7
+FACTORY_STATE_MAX_TRANSITIONS = 40
+FACTORY_STATE_RECOGNITION_TIMEOUT_MS = 2000
+FACTORY_STATE_SETTLE_SECONDS = 0.8
+FACTORY_ACQUISITION_TIMEOUT_SECONDS = 30.0
+FACTORY_ACQUISITION_POLL_SECONDS = 0.25
+FACTORY_AUTO_RESEARCH_CHECK_OFFSET_X = 13
+FACTORY_AUTO_RESEARCH_INNER_RADIUS = 6
+FACTORY_AUTO_RESEARCH_GREEN_COUNT = 5
 DEPARTMENT_STORE_VERTICAL_VIEWPORTS = 8
 DEPARTMENT_STORE_HORIZONTAL_VIEWPORTS = 3
 DEPARTMENT_STORE_VERTICAL_REWIND_SWIPES = 6
@@ -72,12 +108,82 @@ TRANSITION_CONFIRM_TIMEOUT_SECONDS = 3.0
 TRANSITION_CONFIRM_POLL_TIMEOUT_MS = 500
 TRANSITION_CONFIRM_POLL_INTERVAL_SECONDS = 0.1
 TRANSITION_ACTION_RETRIES = 3
+LUCKY_DRAW_RESULT_TIMEOUT_SECONDS = 20.0
+ARTIST_PROMOTION_RESULT_TIMEOUT_SECONDS = 5.0
 PARTNER_CANDIDATE_ENTRIES = (
-    "点击第五个伙伴",
     "点击第六个伙伴",
+    "点击第五个伙伴",
     "点击第四个伙伴",
 )
 Reporter = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class DailyTaskSpec:
+    key: str
+    label: str
+    forward_entry: str
+    destination_entry: str
+    group: str
+
+
+@dataclass(frozen=True)
+class DailyOcrText:
+    text: str
+    box: tuple[int, int, int, int]
+
+
+DAILY_TASK_SPECS = (
+    DailyTaskSpec(
+        "store_upgrade",
+        "任意店铺升级10次",
+        "任意店铺升级任务前往",
+        "百货界面已打开",
+        "百货",
+    ),
+    DailyTaskSpec(
+        "fresh_stock",
+        "生鲜超市进货1次",
+        "生鲜超市进货任务前往",
+        "百货界面已打开",
+        "百货",
+    ),
+    DailyTaskSpec(
+        "lucky_draw",
+        "幸运扭蛋抽奖1次",
+        "幸运扭蛋任务前往",
+        "百货界面已打开",
+        "百货",
+    ),
+    DailyTaskSpec(
+        "club_exchange",
+        "私人会馆商店兑换1次商品",
+        "私人会馆兑换任务前往",
+        "私人会馆界面已打开",
+        "百货",
+    ),
+    DailyTaskSpec(
+        "artist_promote",
+        "艺人宣传3次",
+        "艺人宣传任务前往",
+        "影视城界面已打开",
+        "艺人",
+    ),
+    DailyTaskSpec(
+        "partner_upgrade",
+        "伙伴升级5次",
+        "伙伴升级任务前往",
+        "伙伴列表界面已打开",
+        "伙伴",
+    ),
+    DailyTaskSpec(
+        "factory_research",
+        "关卡工厂研发5次",
+        "关卡工厂研发任务前往",
+        "关卡工厂界面已打开",
+        "工厂",
+    ),
+)
 
 
 class AutomationCancelled(RuntimeError):
@@ -428,6 +534,7 @@ def handle_interrupting_login_popup(
             timeout_ms=1000,
         ):
             raise RuntimeError("检测到本次登录赠礼，但勾选不再提示失败。")
+        report("[选项检查] 勾选点击已执行：本次登录不再提示")
         time.sleep(INTERRUPTING_POPUP_CHECKBOX_SETTLE_SECONDS)
 
         gift_still_visible = True
@@ -559,6 +666,7 @@ def handle_interrupting_activity_popup(
         timeout_ms=1000,
     ):
         raise RuntimeError("检测到活动跳转弹窗，但勾选今天不再提示失败。")
+    report("[选项检查] 勾选点击已执行：活动今天不再提示")
     time.sleep(INTERRUPTING_POPUP_CHECKBOX_SETTLE_SECONDS)
 
     for close_attempt in range(1, INTERRUPTING_POPUP_CLOSE_ATTEMPTS + 1):
@@ -587,6 +695,47 @@ def handle_interrupting_activity_popup(
     raise RuntimeError("活动跳转弹窗连续 3 次点击稍后再去仍未关闭。")
 
 
+def handle_interrupting_tap_anywhere_popup(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+    detection_timeout_ms: int = 1000,
+) -> bool:
+    """处理任意时机出现、以“点击任意处关闭”为锚点的展示弹窗。"""
+    ensure_not_cancelled(cancel_event)
+    if not _try_recognize_once(
+        tasker,
+        "商战冠军点击任意处弹窗",
+        timeout_ms=detection_timeout_ms,
+    ):
+        return False
+
+    report("[弹窗恢复] 检测到商战冠军展示弹窗，点击任意处关闭")
+    for close_attempt in range(1, INTERRUPTING_POPUP_CLOSE_ATTEMPTS + 1):
+        ensure_not_cancelled(cancel_event)
+        if not _try_execute_once(
+            tasker,
+            "点击关闭商战冠军弹窗固定位置",
+            timeout_ms=1000,
+        ):
+            raise RuntimeError("检测到商战冠军展示弹窗，但点击关闭失败。")
+        time.sleep(INTERRUPTING_POPUP_CLOSE_SETTLE_SECONDS)
+        if not _try_recognize_once(
+            tasker,
+            "商战冠军点击任意处弹窗",
+            timeout_ms=750,
+        ):
+            report("[弹窗恢复] 商战冠军展示弹窗已关闭，恢复原流程")
+            return True
+        if close_attempt < INTERRUPTING_POPUP_CLOSE_ATTEMPTS:
+            report(
+                "[弹窗恢复] 商战冠军展示弹窗仍在，准备重试任意处关闭"
+                f"（{close_attempt + 1}/{INTERRUPTING_POPUP_CLOSE_ATTEMPTS}）"
+            )
+
+    raise RuntimeError("商战冠军展示弹窗连续 3 次点击后仍未关闭。")
+
+
 def handle_interrupting_popups(
     tasker: Tasker,
     report: Reporter = print,
@@ -597,6 +746,15 @@ def handle_interrupting_popups(
     handled_any = False
     next_detection_timeout_ms = detection_timeout_ms
     for _ in range(INTERRUPTING_POPUP_MAX_CONSECUTIVE_ROUNDS):
+        if handle_interrupting_tap_anywhere_popup(
+            tasker,
+            report,
+            cancel_event,
+            detection_timeout_ms=next_detection_timeout_ms,
+        ):
+            handled_any = True
+            next_detection_timeout_ms = 500
+            continue
         if handle_interrupting_activity_popup(
             tasker,
             report,
@@ -623,6 +781,169 @@ def handle_interrupting_popups(
     )
 
 
+def main_screen_is_reached(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+    total_timeout_ms: int = 1500,
+    context: str = "检查",
+) -> bool:
+    """逐项记录主界面锚点，以多数命中避免单个艺术字偶发漏识别。"""
+    ensure_not_cancelled(cancel_event)
+    per_anchor_timeout_ms = max(1, total_timeout_ms // len(MAIN_SCREEN_ANCHORS))
+    results: list[tuple[str, bool]] = []
+    for entry, label in MAIN_SCREEN_ANCHORS:
+        ensure_not_cancelled(cancel_event)
+        matched = _try_recognize_once(
+            tasker,
+            entry,
+            timeout_ms=per_anchor_timeout_ms,
+        )
+        results.append((label, matched))
+        report(
+            f"[主界面识别] {context}：{label}="
+            f"{'命中' if matched else '未命中'}"
+        )
+
+    matched_count = sum(matched for _, matched in results)
+    reached = matched_count >= MAIN_SCREEN_REQUIRED_ANCHORS
+    summary = "，".join(
+        f"{label}:{'✓' if matched else '×'}" for label, matched in results
+    )
+    report(
+        f"[主界面识别] {context}汇总：{summary}；"
+        f"命中 {matched_count}/{len(results)}，"
+        f"要求至少 {MAIN_SCREEN_REQUIRED_ANCHORS} 项，"
+        f"结论={'已到达' if reached else '未到达'}"
+    )
+    return reached
+
+
+def wait_for_main_screen(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    report(
+        "[主界面识别] 开始确认主界面："
+        f"{len(MAIN_SCREEN_ANCHORS)} 个锚点中至少命中 "
+        f"{MAIN_SCREEN_REQUIRED_ANCHORS} 个"
+    )
+    for round_number in range(1, MAIN_SCREEN_INITIAL_CHECK_ROUNDS + 1):
+        if main_screen_is_reached(
+            tasker,
+            report,
+            cancel_event,
+            context=f"初始第 {round_number}/{MAIN_SCREEN_INITIAL_CHECK_ROUNDS} 轮",
+        ):
+            report(f"[主界面识别] 已确认到达主界面（第 {round_number} 轮）")
+            capture_debug_step("主界面详细识别成功")
+            return
+
+        capture_debug_step(
+            f"主界面详细识别未通过（第 {round_number}/{MAIN_SCREEN_INITIAL_CHECK_ROUNDS} 轮）"
+        )
+        if handle_interrupting_popups(
+            tasker,
+            report,
+            cancel_event,
+            detection_timeout_ms=POPUP_POLL_TIMEOUT_MS,
+        ):
+            report("[主界面识别] 已清除已知中断弹窗，继续下一轮确认")
+        if round_number < MAIN_SCREEN_INITIAL_CHECK_ROUNDS:
+            time.sleep(MAIN_SCREEN_CHECK_INTERVAL_SECONDS)
+
+    report("[主界面识别] 连续详细检查仍未通过，进入未知弹窗兜底")
+    if try_unknown_popup_fallback(
+        tasker,
+        "主界面已到达",
+        report,
+        cancel_event,
+    ):
+        report("[主界面识别] 未知弹窗兜底后已确认到达主界面")
+        capture_debug_step("未知弹窗兜底后主界面识别成功")
+        return
+
+    capture_debug_step("主界面详细识别最终失败")
+    raise RuntimeError(
+        "主界面识别失败：三个导航锚点连续检查及未知弹窗兜底后，"
+        f"仍未达到至少 {MAIN_SCREEN_REQUIRED_ANCHORS} 项命中的要求。"
+    )
+
+
+def _try_unknown_popup_random_click(tasker: Tasker, x: int, y: int) -> bool:
+    entry = "未知弹窗随机点击"
+    override = {
+        entry: {
+            "next": [],
+            "pre_delay": 0,
+            "post_delay": 0,
+            "timeout": 1000,
+            "target": [x, y],
+        }
+    }
+    succeeded = _task_succeeded(tasker.post_task(entry, override))
+    if succeeded:
+        capture_debug_step(f"完成未知弹窗随机点击：({x}, {y})")
+    return succeeded
+
+
+def try_unknown_popup_fallback(
+    tasker: Tasker,
+    entry: str,
+    report: Reporter = print,
+    cancel_event=None,
+) -> bool:
+    """最多随机点击三轮；每轮后重新执行原任务，成功即停止点击。"""
+    report(
+        f"[未知弹窗兜底] {entry} 未识别成功，"
+        f"开始最多 {UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮随机点击恢复"
+    )
+    for round_number in range(1, UNKNOWN_POPUP_FALLBACK_ROUNDS + 1):
+        ensure_not_cancelled(cancel_event)
+        x = random.randint(*UNKNOWN_POPUP_CLICK_X_RANGE)
+        y = random.randint(*UNKNOWN_POPUP_CLICK_Y_RANGE)
+        report(
+            f"[未知弹窗兜底] 第 {round_number}/{UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮，"
+            f"点击安全区域随机位置 ({x}, {y})"
+        )
+        if not _try_unknown_popup_random_click(tasker, x, y):
+            capture_debug_step(
+                f"未知弹窗随机点击失败：第 {round_number} 轮 ({x}, {y})"
+            )
+            continue
+
+        time.sleep(UNKNOWN_POPUP_CLICK_SETTLE_SECONDS)
+        ensure_not_cancelled(cancel_event)
+        report(f"[未知弹窗兜底] 重新判断原任务：{entry}")
+        if entry == "主界面已到达":
+            task_recovered = main_screen_is_reached(
+                tasker,
+                report,
+                cancel_event,
+                context=(
+                    f"未知弹窗兜底第 {round_number}/{UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮"
+                ),
+            )
+        else:
+            task_recovered = _task_succeeded(tasker.post_task(entry))
+        if task_recovered:
+            capture_debug_step(f"未知弹窗兜底后完成任务：{entry}")
+            report(
+                f"[未知弹窗兜底] 原任务已恢复（第 {round_number} 轮）：{entry}"
+            )
+            return True
+        capture_debug_step(
+            f"未知弹窗兜底后任务仍未完成：{entry}（第 {round_number} 轮）"
+        )
+
+    report(
+        f"[未知弹窗兜底] 已完成 {UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮随机点击，"
+        f"原任务仍未识别成功：{entry}"
+    )
+    return False
+
+
 def run_task(
     tasker: Tasker,
     entry: str,
@@ -630,6 +951,13 @@ def run_task(
     cancel_event=None,
 ) -> None:
     report(f"[执行] {entry}")
+    if handle_interrupting_popups(
+        tasker,
+        report,
+        cancel_event,
+        detection_timeout_ms=POPUP_POLL_TIMEOUT_MS,
+    ):
+        report(f"[弹窗恢复] 已在执行前清除中断弹窗：{entry}")
     for recovery in range(INTERRUPTING_POPUP_MAX_RECOVERIES + 1):
         ensure_not_cancelled(cancel_event)
         if _task_succeeded(tasker.post_task(entry)):
@@ -645,6 +973,11 @@ def run_task(
             cancel_event,
             detection_timeout_ms=2500,
         ):
+            if (
+                entry not in UNKNOWN_POPUP_FALLBACK_EXCLUDED_ENTRIES
+                and try_unknown_popup_fallback(tasker, entry, report, cancel_event)
+            ):
+                return
             break
         report(
             f"[弹窗恢复] 重新执行：{entry}"
@@ -668,7 +1001,7 @@ def try_recognize(
             return True
         if (
             not recover_interrupting_popup
-            or entry in {"本次登录不再提示弹窗", "任意活动稍后再去弹窗"}
+            or entry in INTERRUPTING_POPUP_ENTRIES
             or recovery >= INTERRUPTING_POPUP_MAX_RECOVERIES
             or not handle_interrupting_popups(tasker, report, cancel_event)
         ):
@@ -683,6 +1016,13 @@ def try_execute(
     report: Reporter = print,
     cancel_event=None,
 ) -> bool:
+    if handle_interrupting_popups(
+        tasker,
+        report,
+        cancel_event,
+        detection_timeout_ms=POPUP_POLL_TIMEOUT_MS,
+    ):
+        report(f"[弹窗恢复] 已在可选动作前清除中断弹窗：{entry}")
     for recovery in range(INTERRUPTING_POPUP_MAX_RECOVERIES + 1):
         ensure_not_cancelled(cancel_event)
         if _try_execute_once(tasker, entry, POPUP_POLL_TIMEOUT_MS):
@@ -712,14 +1052,24 @@ def _transition_confirmed(
             TRANSITION_CONFIRM_POLL_TIMEOUT_MS,
             max(1, int(remaining_seconds * 1000)),
         )
-        if try_recognize(
-            tasker,
-            destination_entry,
-            timeout_ms=timeout_ms,
-            report=report,
-            cancel_event=cancel_event,
-            recover_interrupting_popup=False,
-        ):
+        if destination_entry == "主界面已到达":
+            destination_confirmed = main_screen_is_reached(
+                tasker,
+                report,
+                cancel_event,
+                total_timeout_ms=timeout_ms,
+                context="跳转确认",
+            )
+        else:
+            destination_confirmed = try_recognize(
+                tasker,
+                destination_entry,
+                timeout_ms=timeout_ms,
+                report=report,
+                cancel_event=cancel_event,
+                recover_interrupting_popup=False,
+            )
+        if destination_confirmed:
             return True
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds > 0:
@@ -748,6 +1098,17 @@ def confirm_transition(
         return
 
     capture_debug_step(f"跳转确认失败：{action_entry} -> {destination_entry}")
+    if try_unknown_popup_fallback(
+        tasker,
+        destination_entry,
+        report,
+        cancel_event,
+    ):
+        report(
+            f"[跳转确认] {action_entry} -> {destination_entry}："
+            "未知弹窗兜底后已确认跳转成功"
+        )
+        return
     raise RuntimeError(
         f"执行“{action_entry}”后等待 {TRANSITION_CONFIRM_TIMEOUT_SECONDS:g} 秒，"
         f"仍未确认目标界面“{destination_entry}”；已停止后续操作。"
@@ -789,6 +1150,17 @@ def run_confirmed_transition(
                 f"准备重新点击（重试 {attempt}/{TRANSITION_ACTION_RETRIES}）"
             )
 
+    if try_unknown_popup_fallback(
+        tasker,
+        destination_entry,
+        report,
+        cancel_event,
+    ):
+        report(
+            f"[跳转确认] {action_entry} -> {destination_entry}："
+            "未知弹窗兜底后已确认跳转成功"
+        )
+        return
     raise RuntimeError(
         f"执行“{action_entry}”后连续重试 {TRANSITION_ACTION_RETRIES} 次，"
         f"每次等待 {TRANSITION_CONFIRM_TIMEOUT_SECONDS:g} 秒，"
@@ -939,6 +1311,7 @@ def handle_do_not_remind_popup(
             controller.post_click(*DO_NOT_REMIND_CHECKBOX),
             "勾选今日不再提示",
         )
+        report("[选项检查] 勾选点击已执行：今日不再提示")
         time.sleep(POPUP_POLL_INTERVAL_SECONDS)
         wait_job(
             controller.post_click(*DO_NOT_REMIND_CLOSE),
@@ -1118,6 +1491,178 @@ def rewind_daily_list(
         ensure_not_cancelled(cancel_event)
         wait_job(controller.post_swipe(360, 430, 360, 980, 260), "回到日常列表顶部")
         time.sleep(0.12)
+
+
+def _normalize_daily_ocr_text(value: str) -> str:
+    return re.sub(r"\s+", "", value)
+
+
+def collect_daily_viewport_ocr(tasker: Tasker) -> list[DailyOcrText]:
+    """读取当前日常视口的全部 OCR 文本及位置，供同行状态关联。"""
+    entry = "日常列表OCR盘点"
+    override = {
+        entry: {
+            "recognition": "OCR",
+            "expected": ".+",
+            "roi": [20, 180, 680, 1000],
+            "action": "DoNothing",
+            "next": [],
+            "pre_delay": 0,
+            "post_delay": 0,
+            "timeout": 3000,
+        }
+    }
+    job = tasker.post_task(entry, override)
+    job.wait()
+    if not job.succeeded:
+        return []
+    detail = job.get()
+    if detail is None:
+        return []
+
+    texts: list[DailyOcrText] = []
+    seen: set[tuple[str, tuple[int, int, int, int]]] = set()
+    for node in detail.nodes:
+        recognition = node.recognition
+        if recognition is None:
+            continue
+        for result in recognition.all_results:
+            text = getattr(result, "text", None)
+            box = getattr(result, "box", None)
+            if not text or box is None:
+                continue
+            normalized_box = tuple(int(value) for value in box)
+            item = (_normalize_daily_ocr_text(str(text)), normalized_box)
+            if not item[0] or item in seen:
+                continue
+            seen.add(item)
+            texts.append(DailyOcrText(*item))
+    return texts
+
+
+def classify_daily_viewport(
+    ocr_texts: list[DailyOcrText],
+    specs: tuple[DailyTaskSpec, ...] = DAILY_TASK_SPECS,
+) -> dict[str, str]:
+    """按纵向中心点把任务标题与同行按钮状态关联。"""
+    state_boxes: list[tuple[str, int]] = []
+    for item in ocr_texts:
+        x, y, width, height = item.box
+        if x + width / 2 < 480:
+            continue
+        if "已领取" in item.text:
+            state = DAILY_STATE_CLAIMED
+        elif "领取" in item.text:
+            state = DAILY_STATE_CLAIMABLE
+        elif "前往" in item.text:
+            state = DAILY_STATE_TODO
+        else:
+            continue
+        state_boxes.append((state, y + height // 2))
+
+    found: dict[str, str] = {}
+    for spec in specs:
+        title_boxes = [
+            item
+            for item in ocr_texts
+            if _normalize_daily_ocr_text(spec.label) in item.text
+        ]
+        best_match: tuple[int, str] | None = None
+        for title in title_boxes:
+            _, y, _, height = title.box
+            title_center_y = y + height // 2
+            for state, state_center_y in state_boxes:
+                distance = abs(title_center_y - state_center_y)
+                if distance > DAILY_TASK_ROW_Y_TOLERANCE:
+                    continue
+                if best_match is None or distance < best_match[0]:
+                    best_match = (distance, state)
+        if best_match is not None:
+            found[spec.key] = best_match[1]
+    return found
+
+
+def inventory_daily_tasks(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> dict[str, str]:
+    """首次进入日常后从顶部到底部盘点任务，并生成只读执行计划。"""
+    report("[日常盘点] 开始首次全量盘点：先回到列表顶部，再滚动至底部")
+    rewind_daily_list(controller, report, cancel_event)
+    states: dict[str, str] = {}
+    state_priority = {
+        DAILY_STATE_TODO: 1,
+        DAILY_STATE_CLAIMABLE: 2,
+        DAILY_STATE_CLAIMED: 3,
+    }
+    unchanged_swipes = 0
+
+    for viewport in range(1, DAILY_INVENTORY_MAX_SWIPES + 1):
+        ensure_not_cancelled(cancel_event)
+        ocr_texts = collect_daily_viewport_ocr(tasker)
+        relevant = [
+            item
+            for item in ocr_texts
+            if any(_normalize_daily_ocr_text(spec.label) in item.text for spec in DAILY_TASK_SPECS)
+            or "前往" in item.text
+            or "领取" in item.text
+        ]
+        report(
+            f"[日常盘点] 视口 {viewport} OCR："
+            + (
+                "；".join(f"{item.text}@{item.box}" for item in relevant)
+                if relevant
+                else "未识别到目标任务或状态文字"
+            )
+        )
+        visible_states = classify_daily_viewport(ocr_texts)
+        for spec in DAILY_TASK_SPECS:
+            state = visible_states.get(spec.key)
+            if state is None:
+                continue
+            previous = states.get(spec.key)
+            if previous is None or state_priority[state] > state_priority[previous]:
+                states[spec.key] = state
+                report(
+                    f"[日常盘点] 任务状态：{spec.label}={state}（视口 {viewport}）"
+                )
+        capture_debug_step(f"日常任务盘点视口 {viewport}")
+
+        before = capture_screen(controller)
+        wait_job(controller.post_swipe(360, 980, 360, 430, 420), "盘点日常任务")
+        time.sleep(0.28)
+        after = capture_screen(controller)
+        if daily_list_change(before, after) < 0.8:
+            unchanged_swipes += 1
+            report(
+                f"[日常盘点] 视口 {viewport} 下滑后画面基本未变化"
+                f"（连续 {unchanged_swipes}/2）"
+            )
+        else:
+            unchanged_swipes = 0
+        if unchanged_swipes >= 2:
+            report(f"[日常盘点] 已确认到达列表底部（视口 {viewport}）")
+            break
+    else:
+        report(
+            f"[日常盘点] 已达到最大 {DAILY_INVENTORY_MAX_SWIPES} 次扫描，"
+            "按当前盘点结果继续"
+        )
+
+    report("[日常盘点] 从底部回到顶部，准备按计划执行")
+    rewind_daily_list(controller, report, cancel_event)
+    plan: dict[str, str] = {}
+    for spec in DAILY_TASK_SPECS:
+        state = states.get(spec.key, DAILY_STATE_UNKNOWN)
+        plan[spec.key] = state
+        decision = "执行" if state == DAILY_STATE_TODO else "跳过"
+        report(
+            f"[日常计划] {spec.label}：状态={state}，决策={decision}"
+        )
+    capture_debug_step("日常任务首次盘点完成")
+    return plan
 
 
 def seek_daily_task(
@@ -1341,6 +1886,141 @@ def seek_department_store_shop(
     )
 
 
+def enter_fresh_supermarket_from_daily(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """从生鲜进货日常进入百货楼层，再打开被定位的生鲜超市。"""
+    report("[生鲜入口] 点击日常“前往”，目标应为百货楼层而非生鲜超市内部")
+    run_daily_forward(
+        tasker,
+        controller,
+        "生鲜超市进货任务前往",
+        "百货界面已打开",
+        report,
+        cancel_event,
+    )
+    run_task(tasker, "百货界面已打开", report, cancel_event)
+    report("[生鲜入口] 已确认进入百货楼层，开始识别“生鲜超市”入口文字")
+
+    if try_recognize(
+        tasker,
+        "点击生鲜超市入口",
+        report=report,
+        cancel_event=cancel_event,
+    ):
+        report("[生鲜入口] OCR 已识别“生鲜超市”，按文字位置点击")
+        action_entry = "点击生鲜超市入口"
+    else:
+        report(
+            "[生鲜入口] OCR 未识别“生鲜超市”；可能被引导手指遮挡，"
+            "改用日常“前往”定位后的入口区域点击"
+        )
+        capture_debug_step("生鲜超市入口文字未识别，使用引导页固定位置")
+        action_entry = "点击日常定位的生鲜超市入口"
+
+    run_confirmed_transition(
+        tasker,
+        action_entry,
+        "生鲜超市界面已打开",
+        report,
+        cancel_event,
+    )
+    report(f"[生鲜入口] 已确认进入生鲜超市内部；入口方式={action_entry}")
+
+
+def enter_lucky_draw_from_daily(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """从幸运扭蛋日常进入百货楼层，再打开被定位的幸运扭蛋。"""
+    report("[扭蛋入口] 点击日常“前往”，目标应为百货楼层而非幸运扭蛋内部")
+    run_daily_forward(
+        tasker,
+        controller,
+        "幸运扭蛋任务前往",
+        "百货界面已打开",
+        report,
+        cancel_event,
+    )
+    run_task(tasker, "百货界面已打开", report, cancel_event)
+    report("[扭蛋入口] 已确认进入百货楼层，开始识别“幸运扭蛋”入口文字")
+
+    if try_recognize(
+        tasker,
+        "点击幸运扭蛋",
+        report=report,
+        cancel_event=cancel_event,
+    ):
+        report("[扭蛋入口] OCR 已识别“幸运扭蛋”，按文字位置点击")
+        action_entry = "点击幸运扭蛋"
+    else:
+        report(
+            "[扭蛋入口] OCR 未识别“幸运扭蛋”；"
+            "改用日常“前往”定位后的右上入口区域点击"
+        )
+        capture_debug_step("幸运扭蛋入口文字未识别，使用日常定位固定位置")
+        action_entry = "点击日常定位的幸运扭蛋入口"
+
+    run_confirmed_transition(
+        tasker,
+        action_entry,
+        "幸运扭蛋界面已打开",
+        report,
+        cancel_event,
+    )
+    report(f"[扭蛋入口] 已确认进入幸运扭蛋内部；入口方式={action_entry}")
+
+
+def enter_artist_from_daily(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """从艺人宣传日常进入影视城外层，再打开被定位的艺人入口。"""
+    report("[艺人入口] 点击日常“前往”，先确认进入影视城外层")
+    run_daily_forward(
+        tasker,
+        controller,
+        "艺人宣传任务前往",
+        "影视城界面已打开",
+        report,
+        cancel_event,
+    )
+    run_task(tasker, "影视城界面已打开", report, cancel_event)
+    report("[艺人入口] 已确认进入影视城外层，开始识别“艺人”入口文字")
+
+    if try_recognize(
+        tasker,
+        "点击艺人",
+        report=report,
+        cancel_event=cancel_event,
+    ):
+        report("[艺人入口] OCR 已识别“艺人”，按文字位置点击")
+        action_entry = "点击艺人"
+    else:
+        report(
+            "[艺人入口] OCR 未识别“艺人”；可能被引导手指遮挡，"
+            "改用日常“前往”定位后的艺人标签左侧点击"
+        )
+        capture_debug_step("艺人入口文字未识别，使用日常定位固定位置")
+        action_entry = "点击日常定位的艺人入口"
+
+    run_confirmed_transition(
+        tasker,
+        action_entry,
+        "艺人界面已打开",
+        report,
+        cancel_event,
+    )
+    report(f"[艺人入口] 已确认进入艺人内部；入口方式={action_entry}")
+
+
 def return_to_daily(
     tasker: Tasker,
     report: Reporter = print,
@@ -1371,6 +2051,119 @@ def checkbox_is_selected(
     )
 
 
+def find_recognition_box(
+    tasker: Tasker,
+    entry: str,
+    timeout_ms: int = 1500,
+) -> tuple[int, int, int, int] | None:
+    """执行一次只识别不点击的节点，并返回首个识别框。"""
+    override = {
+        entry: {
+            "action": "DoNothing",
+            "next": [],
+            "pre_delay": 0,
+            "post_delay": 0,
+            "timeout": timeout_ms,
+        }
+    }
+    job = tasker.post_task(entry, override)
+    job.wait()
+    if not job.succeeded:
+        return None
+    detail = job.get()
+    if detail is None:
+        return None
+    for node in detail.nodes:
+        recognition = node.recognition
+        if recognition is None:
+            continue
+        for result in recognition.all_results:
+            box = getattr(result, "box", None)
+            if box is not None:
+                return tuple(int(value) for value in box)
+    return None
+
+
+def factory_auto_research_selection(
+    image: np.ndarray,
+    text_box: tuple[int, int, int, int],
+) -> tuple[bool, int, tuple[int, int]]:
+    """根据“自动研发”左侧圆框中央是否存在绿色勾判断选中状态。"""
+    x, y, _width, height = text_box
+    center_x = x - FACTORY_AUTO_RESEARCH_CHECK_OFFSET_X
+    center_y = y + height // 2
+    radius = FACTORY_AUTO_RESEARCH_INNER_RADIUS
+    image_height, image_width = image.shape[:2]
+    left = max(0, center_x - radius)
+    right = min(image_width, center_x + radius + 1)
+    top = max(0, center_y - radius)
+    bottom = min(image_height, center_y + radius + 1)
+    roi = image[top:bottom, left:right]
+    if roi.size == 0 or roi.ndim < 3 or roi.shape[2] < 3:
+        return False, 0, (center_x, center_y)
+
+    channel_0 = roi[:, :, 0].astype(np.int16)
+    green = roi[:, :, 1].astype(np.int16)
+    channel_2 = roi[:, :, 2].astype(np.int16)
+    green_pixels = (
+        (green >= 130)
+        & (green >= channel_0 + 20)
+        & (green >= channel_2 + 20)
+    )
+    green_count = int(green_pixels.sum())
+    return (
+        green_count >= FACTORY_AUTO_RESEARCH_GREEN_COUNT,
+        green_count,
+        (center_x, center_y),
+    )
+
+
+def ensure_factory_auto_research_unselected(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """仅在绿色勾明确存在时取消自动研发，并复核为未选中。"""
+    ensure_not_cancelled(cancel_event)
+    text_box = find_recognition_box(tasker, "自动研发文字")
+    if text_box is None:
+        capture_debug_step("未识别自动研发文字")
+        raise RuntimeError("已检测到研发按钮，但未能定位“自动研发”选项。")
+
+    image = capture_screen(controller)
+    selected, green_count, center = factory_auto_research_selection(image, text_box)
+    report(
+        "[关卡工厂选项] 自动研发初始状态="
+        f"{'已选中' if selected else '未选中'}；"
+        f"绿色中心像素={green_count}；勾选框中心={center}"
+    )
+    if not selected:
+        capture_debug_step("自动研发已确认未选中")
+        return
+
+    report(f"[关卡工厂选项] 点击勾选框 {center}，取消自动研发")
+    wait_job(controller.post_click(*center), "取消勾选自动研发")
+    time.sleep(CHECKBOX_CONFIRM_INTERVAL_SECONDS)
+    ensure_not_cancelled(cancel_event)
+
+    refreshed_box = find_recognition_box(tasker, "自动研发文字") or text_box
+    refreshed_image = capture_screen(controller)
+    still_selected, refreshed_count, refreshed_center = factory_auto_research_selection(
+        refreshed_image,
+        refreshed_box,
+    )
+    report(
+        "[关卡工厂选项] 取消后复核状态="
+        f"{'仍为已选中' if still_selected else '已取消'}；"
+        f"绿色中心像素={refreshed_count}；勾选框中心={refreshed_center}"
+    )
+    if still_selected:
+        capture_debug_step("自动研发取消后仍为选中")
+        raise RuntimeError("点击后仍检测到“自动研发”绿色勾，已停止研发操作。")
+    capture_debug_step("自动研发已取消并复核")
+
+
 def ensure_checkbox_selected(
     tasker: Tasker,
     checked_entry: str,
@@ -1378,19 +2171,37 @@ def ensure_checkbox_selected(
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    if checkbox_is_selected(tasker, checked_entry, report, cancel_event):
-        report(f"[选项] 已确认勾选：{checked_entry}")
+    report(
+        f"[选项检查] 开始检查：{checked_entry}；"
+        f"未选中时将执行：{click_entry}"
+    )
+    initially_selected = checkbox_is_selected(
+        tasker,
+        checked_entry,
+        report,
+        cancel_event,
+    )
+    if initially_selected:
+        report(f"[选项检查] 初始状态=已选中，无需点击：{checked_entry}")
+        capture_debug_step(f"选项初始已选中：{checked_entry}")
         return
 
-    report(f"[选项] 当前未勾选，准备点击：{checked_entry}")
+    report(f"[选项检查] 初始状态=未选中，准备点击：{click_entry}")
+    capture_debug_step(f"选项初始未选中：{checked_entry}")
     run_task(tasker, click_entry, report, cancel_event)
+    report(
+        f"[选项检查] 勾选点击已执行：{click_entry}；"
+        f"开始复核：{checked_entry}"
+    )
     deadline = time.monotonic() + CHECKBOX_CONFIRM_TIMEOUT_SECONDS
+    confirm_attempt = 0
     while True:
         ensure_not_cancelled(cancel_event)
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
             break
-        if checkbox_is_selected(
+        confirm_attempt += 1
+        selected_after_click = checkbox_is_selected(
             tasker,
             checked_entry,
             report,
@@ -1399,13 +2210,25 @@ def ensure_checkbox_selected(
                 POPUP_POLL_TIMEOUT_MS,
                 max(1, int(remaining_seconds * 1000)),
             ),
-        ):
-            report(f"[选项] 点击后已确认绿色勾：{checked_entry}")
+        )
+        report(
+            f"[选项检查] 点击后复核 {confirm_attempt}："
+            f"状态={'已选中' if selected_after_click else '未选中'}；"
+            f"目标={checked_entry}"
+        )
+        if selected_after_click:
+            report(f"[选项检查] 最终确认=已选中：{checked_entry}")
+            capture_debug_step(f"选项点击后已确认选中：{checked_entry}")
             return
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds > 0:
             time.sleep(min(CHECKBOX_CONFIRM_INTERVAL_SECONDS, remaining_seconds))
 
+    report(
+        f"[选项检查] 最终确认=失败：{checked_entry}；"
+        f"共复核 {confirm_attempt} 次，停止后续消费动作"
+    )
+    capture_debug_step(f"选项点击后仍未选中：{checked_entry}")
     raise RuntimeError(
         f"等待 {CHECKBOX_CONFIRM_TIMEOUT_SECONDS:g} 秒后仍未能确认绿色勾，"
         f"已停止后续消费动作：{checked_entry}"
@@ -1418,16 +2241,25 @@ def dismiss_result_overlay(
     result_entry: str,
     report: Reporter = print,
     cancel_event=None,
+    wait_timeout_seconds: float = TRANSITION_CONFIRM_TIMEOUT_SECONDS,
 ) -> None:
-    deadline = time.monotonic() + TRANSITION_CONFIRM_TIMEOUT_SECONDS
+    started_at = time.monotonic()
+    deadline = started_at + wait_timeout_seconds
+    poll_count = 0
+    report(
+        f"[结果弹层] 开始等待：{result_entry}；"
+        f"最长等待 {wait_timeout_seconds:g} 秒"
+    )
     while True:
         ensure_not_cancelled(cancel_event)
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
+            capture_debug_step(f"等待结果弹层超时：{result_entry}")
             raise RuntimeError(
-                f"等待 {TRANSITION_CONFIRM_TIMEOUT_SECONDS:g} 秒后仍未识别到结果弹层："
+                f"等待 {wait_timeout_seconds:g} 秒后仍未识别到结果弹层："
                 f"{result_entry}"
             )
+        poll_count += 1
         if try_recognize(
             tasker,
             result_entry,
@@ -1437,169 +2269,244 @@ def dismiss_result_overlay(
             ),
             report=report,
             cancel_event=cancel_event,
+            recover_interrupting_popup=False,
         ):
-            report(f"[跳转确认] 已确认结果弹层：{result_entry}")
+            elapsed_seconds = time.monotonic() - started_at
+            report(
+                f"[结果弹层] 已识别：{result_entry}；"
+                f"轮询 {poll_count} 次，耗时 {elapsed_seconds:.1f} 秒"
+            )
+            capture_debug_step(f"已识别结果弹层：{result_entry}")
             break
+        elapsed_seconds = time.monotonic() - started_at
+        report(
+            f"[结果弹层] 第 {poll_count} 次尚未识别：{result_entry}；"
+            f"已等待 {elapsed_seconds:.1f} 秒，剩余最多 "
+            f"{max(0.0, deadline - time.monotonic()):.1f} 秒"
+        )
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds > 0:
             time.sleep(min(TRANSITION_CONFIRM_POLL_INTERVAL_SECONDS, remaining_seconds))
     ensure_not_cancelled(cancel_event)
     # 结果层明确提示“点击任意处关闭”；使用左上安全空白区，避开底部按钮。
+    report(f"[结果弹层] 点击安全位置关闭：{result_entry}")
     wait_job(controller.post_click(80, 220), "关闭结果弹层")
     time.sleep(0.35)
     if try_recognize(
-        tasker, result_entry, report=report, cancel_event=cancel_event
+        tasker,
+        result_entry,
+        report=report,
+        cancel_event=cancel_event,
+        recover_interrupting_popup=False,
     ):
+        capture_debug_step(f"结果弹层关闭失败：{result_entry}")
         raise RuntimeError(f"结果弹层未关闭：{result_entry}")
+    report(f"[结果弹层] 已确认关闭：{result_entry}")
+    capture_debug_step(f"结果弹层已关闭：{result_entry}")
 
 
 def complete_commercial_daily_group(
     tasker: Tasker,
     controller: AdbController,
+    daily_plan: dict[str, str],
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    """百货组只从日常前往一次，后续任务复用百货底部 Tab。"""
-    report("[日常计划] 批量处理百货组")
-    report("[日常计划] 直接从“任意店铺升级10次”前往百货，不预判完成状态")
-    run_daily_forward(
-        tasker,
-        controller,
-        "任意店铺升级任务前往",
-        "百货界面已打开",
-        report,
-        cancel_event,
-    )
-    run_task(tasker, "百货界面已打开", report, cancel_event)
+    """仅执行盘点为待完成的百货任务，并复用已进入的百货页面。"""
+    pending = {
+        key
+        for key in ("store_upgrade", "fresh_stock", "lucky_draw", "club_exchange")
+        if daily_plan.get(key) == DAILY_STATE_TODO
+    }
+    if not pending:
+        report("[日常计划] 百货组没有待完成任务，整组跳过")
+        return
 
-    seek_department_store_shop(
-        tasker,
-        controller,
-        "点击生鲜超市入口",
-        "生鲜超市",
-        report,
-        cancel_event,
-    )
-    run_confirmed_transition(
-        tasker,
-        "点击生鲜超市入口",
-        "生鲜超市界面已打开",
-        report,
-        cancel_event,
-        action_already_performed=True,
-    )
-    ensure_checkbox_selected(tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event)
-    run_task(tasker, "生鲜超市升级", report, cancel_event)
-    run_confirmed_transition(
-        tasker,
-        "点击进货",
-        "进货界面已打开",
-        report,
-        cancel_event,
-    )
-    ensure_checkbox_selected(tasker, "一键进货已勾选", "勾选一键进货", report, cancel_event)
-    run_task(tasker, "开始进货", report, cancel_event)
-    dismiss_result_overlay(tasker, controller, "进货成功弹层", report, cancel_event)
-    run_confirmed_transition(
-        tasker,
-        "进货界面返回生鲜超市",
-        "生鲜超市界面已打开",
-        report,
-        cancel_event,
-    )
-    run_confirmed_transition(
-        tasker,
-        "生鲜超市返回百货",
-        "百货界面已打开",
-        report,
-        cancel_event,
-    )
+    report(f"[日常计划] 百货组待完成：{', '.join(sorted(pending))}")
+    at_department_store = False
 
-    run_confirmed_transition(
-        tasker,
-        "点击幸运扭蛋",
-        "幸运扭蛋界面已打开",
-        report,
-        cancel_event,
-    )
-    run_task(tasker, "抽一次", report, cancel_event)
-    dismiss_result_overlay(tasker, controller, "幸运扭蛋结果弹层", report, cancel_event)
-    run_confirmed_transition(
-        tasker,
-        "幸运扭蛋返回百货",
-        "百货界面已打开",
-        report,
-        cancel_event,
-    )
+    if "store_upgrade" in pending:
+        run_daily_forward(
+            tasker,
+            controller,
+            "任意店铺升级任务前往",
+            "百货界面已打开",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "百货界面已打开", report, cancel_event)
+        seek_department_store_shop(
+            tasker,
+            controller,
+            "点击生鲜超市入口",
+            "生鲜超市",
+            report,
+            cancel_event,
+        )
+        run_confirmed_transition(
+            tasker,
+            "点击生鲜超市入口",
+            "生鲜超市界面已打开",
+            report,
+            cancel_event,
+            action_already_performed=True,
+        )
+        ensure_checkbox_selected(
+            tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
+        )
+        run_task(tasker, "生鲜超市升级", report, cancel_event)
+        report("[日常计划] 已执行：任意店铺升级10次")
+    elif "fresh_stock" in pending:
+        enter_fresh_supermarket_from_daily(
+            tasker, controller, report, cancel_event
+        )
 
-    run_confirmed_transition(
-        tasker,
-        "点击私人会馆",
-        "私人会馆界面已打开",
-        report,
-        cancel_event,
-    )
-    run_confirmed_transition(
-        tasker,
-        "点击兑换",
-        "兑换商店界面已打开",
-        report,
-        cancel_event,
-    )
-    run_confirmed_transition(
-        tasker,
-        "点击分钟卡价格",
-        "分钟卡兑换界面已打开",
-        report,
-        cancel_event,
-    )
-    run_task(tasker, "购买分钟卡", report, cancel_event)
-    dismiss_result_overlay(tasker, controller, "分钟卡兑换结果弹层", report, cancel_event)
-    run_confirmed_transition(
-        tasker,
-        "兑换商店返回私人会馆",
-        "私人会馆界面已打开",
-        report,
-        cancel_event,
-    )
-    run_confirmed_transition(
-        tasker,
-        "私人会馆返回百货",
-        "百货界面已打开",
-        report,
-        cancel_event,
-    )
+    if "store_upgrade" in pending or "fresh_stock" in pending:
+        if "fresh_stock" in pending:
+            run_confirmed_transition(
+                tasker,
+                "点击进货",
+                "进货界面已打开",
+                report,
+                cancel_event,
+            )
+            report("[进货] 已确认进入进货页面，开始检查“一键进货”选项")
+            ensure_checkbox_selected(
+                tasker, "一键进货已勾选", "勾选一键进货", report, cancel_event
+            )
+            report("[进货] 已确认“一键进货”处于选中状态，准备开始进货")
+            run_task(tasker, "开始进货", report, cancel_event)
+            report("[进货] 已点击开始进货，等待进货成功结果")
+            dismiss_result_overlay(
+                tasker, controller, "进货成功弹层", report, cancel_event
+            )
+            run_confirmed_transition(
+                tasker,
+                "进货界面返回生鲜超市",
+                "生鲜超市界面已打开",
+                report,
+                cancel_event,
+            )
+            report("[日常计划] 已执行：生鲜超市进货1次")
+        run_confirmed_transition(
+            tasker,
+            "生鲜超市返回百货",
+            "百货界面已打开",
+            report,
+            cancel_event,
+        )
+        at_department_store = True
 
-    click_bottom_department_store(tasker, report, cancel_event)
-    return_to_daily(tasker, report, cancel_event)
+    if "lucky_draw" in pending:
+        if at_department_store:
+            run_confirmed_transition(
+                tasker,
+                "点击幸运扭蛋",
+                "幸运扭蛋界面已打开",
+                report,
+                cancel_event,
+            )
+        else:
+            enter_lucky_draw_from_daily(
+                tasker, controller, report, cancel_event
+            )
+        run_task(tasker, "抽一次", report, cancel_event)
+        dismiss_result_overlay(
+            tasker,
+            controller,
+            "幸运扭蛋结果弹层",
+            report,
+            cancel_event,
+            wait_timeout_seconds=LUCKY_DRAW_RESULT_TIMEOUT_SECONDS,
+        )
+        run_confirmed_transition(
+            tasker,
+            "幸运扭蛋返回百货",
+            "百货界面已打开",
+            report,
+            cancel_event,
+        )
+        at_department_store = True
+        report("[日常计划] 已执行：幸运扭蛋抽奖1次")
+
+    if "club_exchange" in pending:
+        if at_department_store:
+            run_confirmed_transition(
+                tasker,
+                "点击私人会馆",
+                "私人会馆界面已打开",
+                report,
+                cancel_event,
+            )
+        else:
+            run_daily_forward(
+                tasker,
+                controller,
+                "私人会馆兑换任务前往",
+                "私人会馆界面已打开",
+                report,
+                cancel_event,
+            )
+        run_confirmed_transition(
+            tasker, "点击兑换", "兑换商店界面已打开", report, cancel_event
+        )
+        run_confirmed_transition(
+            tasker, "点击分钟卡价格", "分钟卡兑换界面已打开", report, cancel_event
+        )
+        run_task(tasker, "购买分钟卡", report, cancel_event)
+        dismiss_result_overlay(
+            tasker, controller, "分钟卡兑换结果弹层", report, cancel_event
+        )
+        run_confirmed_transition(
+            tasker,
+            "兑换商店返回私人会馆",
+            "私人会馆界面已打开",
+            report,
+            cancel_event,
+        )
+        run_confirmed_transition(
+            tasker,
+            "私人会馆返回百货",
+            "百货界面已打开",
+            report,
+            cancel_event,
+        )
+        at_department_store = True
+        report("[日常计划] 已执行：私人会馆商店兑换1次商品")
+
+    if at_department_store:
+        click_bottom_department_store(tasker, report, cancel_event)
+        return_to_daily(tasker, report, cancel_event)
 
 
 def complete_artist_daily_group(
     tasker: Tasker,
     controller: AdbController,
+    daily_plan: dict[str, str],
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    report("[日常计划] 直接执行艺人宣传，不预判完成状态")
-    run_daily_forward(
+    if daily_plan.get("artist_promote") != DAILY_STATE_TODO:
+        report(
+            "[日常计划] 跳过艺人宣传3次："
+            f"状态={daily_plan.get('artist_promote', DAILY_STATE_UNKNOWN)}"
+        )
+        return
+    report("[日常计划] 执行艺人宣传3次")
+    enter_artist_from_daily(tasker, controller, report, cancel_event)
+    report("[艺人宣传] 已进入艺人列表，开始检查“一键宣传”选项")
+    ensure_checkbox_selected(tasker, "一键宣传已勾选", "勾选一键宣传", report, cancel_event)
+    report("[艺人宣传] 已确认“一键宣传”处于选中状态，准备点击宣传")
+    run_task(tasker, "宣传", report, cancel_event)
+    report("[艺人宣传] 已点击宣传，等待宣传结果")
+    dismiss_result_overlay(
         tasker,
         controller,
-        "艺人宣传任务前往",
-        "影视城界面已打开",
+        "一键宣传结果弹层",
         report,
         cancel_event,
+        wait_timeout_seconds=ARTIST_PROMOTION_RESULT_TIMEOUT_SECONDS,
     )
-    run_task(tasker, "影视城界面已打开", report, cancel_event)
-    run_confirmed_transition(
-        tasker,
-        "点击艺人",
-        "艺人界面已打开",
-        report,
-        cancel_event,
-    )
-    ensure_checkbox_selected(tasker, "一键宣传已勾选", "勾选一键宣传", report, cancel_event)
-    run_task(tasker, "宣传", report, cancel_event)
-    dismiss_result_overlay(tasker, controller, "一键宣传结果弹层", report, cancel_event)
     run_confirmed_transition(
         tasker,
         "艺人返回影视城",
@@ -1614,10 +2521,17 @@ def complete_artist_daily_group(
 def complete_partner_daily_group(
     tasker: Tasker,
     controller: AdbController,
+    daily_plan: dict[str, str],
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    report("[日常计划] 直接执行伙伴升级，不预判完成状态")
+    if daily_plan.get("partner_upgrade") != DAILY_STATE_TODO:
+        report(
+            "[日常计划] 跳过伙伴升级5次："
+            f"状态={daily_plan.get('partner_upgrade', DAILY_STATE_UNKNOWN)}"
+        )
+        return
+    report("[日常计划] 执行伙伴升级5次")
     run_daily_forward(
         tasker,
         controller,
@@ -1752,11 +2666,17 @@ def close_game_application(device, report: Reporter = print) -> bool:
 def complete_factory_research_daily(
     tasker: Tasker,
     controller: AdbController,
+    daily_plan: dict[str, str],
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
+    if daily_plan.get("factory_research") != DAILY_STATE_TODO:
+        report(
+            "[日常计划] 跳过关卡工厂研发5次："
+            f"状态={daily_plan.get('factory_research', DAILY_STATE_UNKNOWN)}"
+        )
+        return
     report("[日常计划] 处理“关卡工厂研发5次”")
-    report("[日常计划] 直接执行关卡工厂研发，不预判完成状态")
     run_daily_forward(
         tasker,
         controller,
@@ -1766,9 +2686,11 @@ def complete_factory_research_daily(
         cancel_event,
     )
     run_task(tasker, "关卡工厂界面已打开", report, cancel_event)
-    for index in range(1, 6):
-        run_task(tasker, "点击研发按钮", report, cancel_event)
-        report(f"[日常计划] 已执行研发 {index}/5")
+    report(
+        "[关卡工厂] 本次执行 7 次手动研发；"
+        "自动研发必须保持未选中，建造和收购均不计入研发次数"
+    )
+    complete_factory_research_actions(tasker, controller, report, cancel_event)
 
     click_bottom_department_store(tasker, report, cancel_event)
     run_confirmed_transition(
@@ -1778,6 +2700,168 @@ def complete_factory_research_daily(
         report,
         cancel_event,
     )
+
+
+def complete_factory_acquisition(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """完成收购谈判；战斗可能自动结束，因此“跳过”只作为可选动作。"""
+    report("[关卡工厂-收购] 检测到“收购”，进入收购谈判流程")
+    run_confirmed_transition(
+        tasker,
+        "点击收购按钮",
+        "收购挑战准备界面已打开",
+        report,
+        cancel_event,
+    )
+    report("[关卡工厂-收购] 已确认挑战准备页，点击“开始挑战”")
+    run_task(tasker, "点击开始收购挑战", report, cancel_event)
+
+    deadline = time.monotonic() + FACTORY_ACQUISITION_TIMEOUT_SECONDS
+    poll_count = 0
+    skipped = False
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        poll_count += 1
+        if _try_recognize_once(
+            tasker,
+            "收购谈判成功结果",
+            timeout_ms=POPUP_POLL_TIMEOUT_MS,
+        ):
+            report(
+                "[关卡工厂-收购] 已识别谈判成功结果；"
+                f"轮询={poll_count}，是否点击过跳过={'是' if skipped else '否'}"
+            )
+            capture_debug_step("识别到收购谈判成功结果")
+            break
+
+        if not skipped and _try_execute_once(
+            tasker,
+            "跳过收购谈判",
+            POPUP_POLL_TIMEOUT_MS,
+        ):
+            skipped = True
+            report("[关卡工厂-收购] 检测到“跳过”并已点击，等待谈判结果")
+            continue
+        time.sleep(FACTORY_ACQUISITION_POLL_SECONDS)
+    else:
+        capture_debug_step("等待收购谈判成功结果超时")
+        raise RuntimeError(
+            f"开始收购挑战后等待 {FACTORY_ACQUISITION_TIMEOUT_SECONDS:g} 秒，"
+            "仍未识别到谈判成功结果。"
+        )
+
+    run_task(tasker, "关闭收购谈判成功结果", report, cancel_event)
+    confirm_transition(
+        tasker,
+        "关闭收购谈判成功结果",
+        "关卡工厂界面已打开",
+        report,
+        cancel_event,
+    )
+    report("[关卡工厂-收购] 已关闭结果并返回关卡工厂，重新判断建造/研发")
+
+
+def reenter_factory_level_tab_for_acquisition(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """本关没有研发和建造时，重新进入关卡地图以触发下一处收购。"""
+    report(
+        "[关卡工厂] 等待后仍无“研发”和“建造”，"
+        "判断本关建设已完成；重新点击底部“关卡”标签"
+    )
+    run_confirmed_transition(
+        tasker,
+        "点击底部关卡标签",
+        "关卡地图收购已出现",
+        report,
+        cancel_event,
+    )
+    report("[关卡工厂] 重新进入关卡地图后已检测到“收购”")
+    complete_factory_acquisition(tasker, report, cancel_event)
+
+
+def complete_factory_research_actions(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """处理会在“收购”“建造”和“研发”之间切换且位置会移动的工厂按钮。"""
+    research_count = 0
+    transition_count = 0
+
+    while research_count < FACTORY_RESEARCH_TARGET_COUNT:
+        ensure_not_cancelled(cancel_event)
+        transition_count += 1
+        if transition_count > FACTORY_STATE_MAX_TRANSITIONS:
+            raise RuntimeError(
+                "关卡工厂状态切换次数过多："
+                f"研发仅完成 {research_count}/{FACTORY_RESEARCH_TARGET_COUNT}，"
+                "已停止后续操作。"
+            )
+
+        report(
+            "[关卡工厂] 开始判断当前操作："
+            f"研发进度 {research_count}/{FACTORY_RESEARCH_TARGET_COUNT}，"
+            f"状态轮次 {transition_count}/{FACTORY_STATE_MAX_TRANSITIONS}"
+        )
+        if _try_recognize_once(
+            tasker,
+            "关卡工厂研发按钮已出现",
+            timeout_ms=FACTORY_STATE_RECOGNITION_TIMEOUT_MS,
+        ):
+            report("[关卡工厂] 检测到“研发”；先确认自动研发处于未选中状态")
+            ensure_factory_auto_research_unselected(
+                tasker,
+                controller,
+                report,
+                cancel_event,
+            )
+            if not _try_execute_once(
+                tasker,
+                "点击研发按钮",
+                FACTORY_STATE_RECOGNITION_TIMEOUT_MS,
+            ):
+                report("[关卡工厂] 选项复核后“研发”按钮暂时消失，重新判断当前状态")
+                time.sleep(FACTORY_STATE_SETTLE_SECONDS)
+                continue
+            research_count += 1
+            report(
+                "[关卡工厂] 检测到“研发”并已点击；"
+                f"研发进度 {research_count}/{FACTORY_RESEARCH_TARGET_COUNT}"
+            )
+            time.sleep(FACTORY_STATE_SETTLE_SECONDS)
+            continue
+
+        report("[关卡工厂] 当前未检测到“研发”，继续检查“建造”或“收购”")
+        if _try_execute_once(
+            tasker,
+            "点击建造按钮",
+            FACTORY_STATE_RECOGNITION_TIMEOUT_MS,
+        ):
+            report(
+                "[关卡工厂] 检测到“建造”并已点击；"
+                "本次不计入研发次数，重新进入研发判断"
+            )
+            time.sleep(FACTORY_STATE_SETTLE_SECONDS)
+            continue
+
+        if _try_recognize_once(
+            tasker,
+            "点击收购按钮",
+            timeout_ms=FACTORY_STATE_RECOGNITION_TIMEOUT_MS,
+        ):
+            complete_factory_acquisition(tasker, report, cancel_event)
+            time.sleep(FACTORY_STATE_SETTLE_SECONDS)
+            continue
+
+        reenter_factory_level_tab_for_acquisition(tasker, report, cancel_event)
+        time.sleep(FACTORY_STATE_SETTLE_SECONDS)
 
 
 def validate_credential(value: str, label: str) -> None:
@@ -1860,7 +2944,6 @@ def run_automation(
         raise RuntimeError("无法配置 MaaFramework 截图缩放。")
     wait_job(controller.post_connection(), "连接模拟器")
     ensure_not_cancelled(cancel_event)
-    validate_reference_canvas(controller, report)
 
     if debug_screenshot_dir is not None:
         _ACTIVE_STEP_SCREENSHOT_RECORDER = StepScreenshotRecorder(
@@ -1883,6 +2966,7 @@ def run_automation(
             raise RuntimeError("MaaFramework Tasker 初始化失败。")
 
         run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        validate_reference_canvas(controller, report)
 
         run_task(tasker, "聚焦账号输入框", report, cancel_event)
         replace_focused_text(device, account, "账号")
@@ -1892,12 +2976,19 @@ def run_automation(
         replace_focused_text(device, password, "密码")
         run_task(tasker, "密码输入已完成", report, cancel_event)
 
-        run_task(tasker, "勾选协议并登录", report, cancel_event)
+        ensure_checkbox_selected(
+            tasker,
+            "用户协议已勾选",
+            "勾选用户协议固定位置",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "点击登录按钮", report, cancel_event)
         select_server(tasker, controller, server_number, report, cancel_event)
         report(f"[选服] 已复核为 {server_number} 区，现在点击开始")
         run_task(tasker, "点击开始按钮", report, cancel_event)
         handle_delayed_popups(tasker, controller, report, cancel_event)
-        run_task(tasker, "主界面已到达", report, cancel_event)
+        wait_for_main_screen(tasker, report, cancel_event)
         run_confirmed_transition(
             tasker,
             "点击日常",
@@ -1905,10 +2996,19 @@ def run_automation(
             report,
             cancel_event,
         )
-        complete_commercial_daily_group(tasker, controller, report, cancel_event)
-        complete_artist_daily_group(tasker, controller, report, cancel_event)
-        complete_partner_daily_group(tasker, controller, report, cancel_event)
-        complete_factory_research_daily(tasker, controller, report, cancel_event)
+        daily_plan = inventory_daily_tasks(tasker, controller, report, cancel_event)
+        complete_commercial_daily_group(
+            tasker, controller, daily_plan, report, cancel_event
+        )
+        complete_artist_daily_group(
+            tasker, controller, daily_plan, report, cancel_event
+        )
+        complete_partner_daily_group(
+            tasker, controller, daily_plan, report, cancel_event
+        )
+        complete_factory_research_daily(
+            tasker, controller, daily_plan, report, cancel_event
+        )
         report("[日常计划] 名媛会培育、商战、环球差旅、伙伴培训按本轮要求暂不执行")
         if not claim_daily_completion_and_exit(tasker, controller, device, report, cancel_event):
             report("已完成当前可执行日常流程；最终完成条件或退出确认未满足，游戏保持运行。")

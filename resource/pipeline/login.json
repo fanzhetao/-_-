@@ -69,6 +69,12 @@
         "target": [228, 792],
         "next": "点击登录按钮"
     },
+    "勾选用户协议固定位置": {
+        "recognition": "DirectHit",
+        "action": "Click",
+        "target": [228, 792],
+        "post_delay": 500
+    },
     "点击登录按钮": {
         "recognition": "OCR",
         "expected": "^登录$",
@@ -185,6 +191,22 @@
         "roi": [60, 720, 600, 220],
         "action": "DoNothing"
     },
+    "商战冠军点击任意处弹窗": {
+        "recognition": "OCR",
+        "expected": "点击任意处关闭",
+        "roi": [160, 1160, 400, 120],
+        "action": "DoNothing"
+    },
+    "点击关闭商战冠军弹窗固定位置": {
+        "recognition": "DirectHit",
+        "action": "Click",
+        "target": [360, 640]
+    },
+    "未知弹窗随机点击": {
+        "recognition": "DirectHit",
+        "action": "Click",
+        "target": [360, 640]
+    },
     "勾选任意活动今天不再提示固定位置": {
         "recognition": "DirectHit",
         "action": "Click",
@@ -260,6 +282,24 @@
         ],
         "box_index": 0
     },
+    "主界面锚点百货": {
+        "recognition": "OCR",
+        "expected": "百货",
+        "roi": [0, 1080, 180, 200],
+        "action": "DoNothing"
+    },
+    "主界面锚点关卡伙伴": {
+        "recognition": "OCR",
+        "expected": "关卡|伙伴",
+        "roi": [180, 1150, 380, 130],
+        "action": "DoNothing"
+    },
+    "主界面锚点影视城背包": {
+        "recognition": "OCR",
+        "expected": "影视城|背包",
+        "roi": [420, 1080, 300, 200],
+        "action": "DoNothing"
+    },
     "点击日常": {
         "recognition": "DirectHit",
         "action": "Click",
@@ -302,6 +342,13 @@
         "action": "Click",
         "post_delay": 250
     },
+    "日常列表OCR盘点": {
+        "recognition": "OCR",
+        "expected": ".+",
+        "roi": [20, 180, 680, 1000],
+        "action": "DoNothing",
+        "timeout": 3000
+    },
     "关卡工厂研发任务已完成": {
         "recognition": "And",
         "all_of": [
@@ -319,36 +366,115 @@
         "box_index": 0
     },
     "关卡工厂研发任务前往": {
-        "recognition": "OCR",
-        "expected": "关卡工厂研发5次",
-        "roi": [0, 180, 720, 1000],
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "关卡工厂研发5次", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
         "action": "Click",
         "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
     },
     "关卡工厂界面已打开": {
-        "recognition": "And",
-        "all_of": [
-            {
-                "recognition": "OCR",
-                "expected": "^研发$",
-                "roi": [400, 450, 300, 400]
-            },
-            {
-                "recognition": "OCR",
-                "expected": "研发托管|紧急订单",
-                "roi": [540, 350, 180, 650]
-            }
-        ],
-        "box_index": 0,
+        "recognition": "OCR",
+        "expected": "^(研发|建造|收购)$",
+        "roi": [0, 250, 720, 800],
         "timeout": 10000
+    },
+    "关卡工厂研发按钮已出现": {
+        "recognition": "OCR",
+        "expected": "^研发$",
+        "roi": [0, 350, 720, 650],
+        "action": "DoNothing",
+        "timeout": 2000
     },
     "点击研发按钮": {
         "recognition": "OCR",
         "expected": "^研发$",
-        "roi": [400, 450, 300, 400],
+        "roi": [0, 350, 720, 650],
         "action": "Click",
         "post_delay": 500
+    },
+    "关卡工厂操作按钮已出现": {
+        "recognition": "OCR",
+        "expected": "^(研发|建造|收购)$",
+        "roi": [0, 250, 720, 800],
+        "action": "DoNothing",
+        "timeout": 1500
+    },
+    "点击建造按钮": {
+        "recognition": "OCR",
+        "expected": "^建造$",
+        "roi": [0, 350, 720, 650],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "点击收购按钮": {
+        "recognition": "OCR",
+        "expected": "^收购$",
+        "roi": [0, 250, 720, 800],
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "点击底部关卡标签": {
+        "recognition": "DirectHit",
+        "action": "Click",
+        "target": [310, 1215],
+        "post_delay": 1000
+    },
+    "关卡地图收购已出现": {
+        "recognition": "OCR",
+        "expected": "^收购$",
+        "roi": [0, 250, 720, 800],
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "收购挑战准备界面已打开": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "谈判|总能力|鼓舞", "roi": [0, 100, 720, 850]},
+            {"recognition": "OCR", "expected": "开始挑战", "roi": [120, 950, 480, 280]}
+        ],
+        "box_index": 1,
+        "timeout": 10000
+    },
+    "点击开始收购挑战": {
+        "recognition": "OCR",
+        "expected": "开始挑战",
+        "roi": [120, 950, 480, 280],
+        "action": "Click",
+        "post_delay": 800
+    },
+    "跳过收购谈判": {
+        "recognition": "OCR",
+        "expected": "^跳过$",
+        "roi": [180, 1020, 360, 260],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "收购谈判成功结果": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "^恭喜$", "roi": [100, 250, 520, 420]},
+            {"recognition": "OCR", "expected": "点击任意处关闭", "roi": [100, 900, 520, 300]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "关闭收购谈判成功结果": {
+        "recognition": "DirectHit",
+        "action": "Click",
+        "target": [360, 800],
+        "post_delay": 1000
+    },
+    "自动研发文字": {
+        "recognition": "OCR",
+        "expected": "自动研发",
+        "roi": [0, 650, 420, 630],
+        "action": "DoNothing",
+        "timeout": 1500
     },
     "点击百货返回主页": {
         "recognition": "OCR",
@@ -367,11 +493,14 @@
         "timeout": 10000
     },
     "任意店铺升级任务前往": {
-        "recognition": "OCR",
-        "expected": "任意店铺升级10次",
-        "roi": [0, 180, 720, 1000],
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "任意店铺升级10次", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
         "action": "Click",
-        "target_offset": [509, 30, -79, 12],
+        "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
     },
     "任意店铺升级任务已完成": {
@@ -384,9 +513,12 @@
         "action": "DoNothing"
     },
     "生鲜超市进货任务前往": {
-        "recognition": "OCR",
-        "expected": "生鲜超市进货1次",
-        "roi": [0, 180, 720, 1000],
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "生鲜超市进货1次", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
         "action": "Click",
         "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
@@ -401,9 +533,12 @@
         "action": "DoNothing"
     },
     "幸运扭蛋任务前往": {
-        "recognition": "OCR",
-        "expected": "幸运扭蛋抽奖1次",
-        "roi": [0, 180, 720, 1000],
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "幸运扭蛋抽奖1次", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
         "action": "Click",
         "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
@@ -418,9 +553,12 @@
         "action": "DoNothing"
     },
     "私人会馆兑换任务前往": {
-        "recognition": "OCR",
-        "expected": "私人会馆商店兑换1次商品",
-        "roi": [0, 180, 720, 1000],
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "私人会馆商店兑换1次商品", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
         "action": "Click",
         "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
@@ -438,6 +576,12 @@
         "recognition": "OCR",
         "expected": "生鲜.*",
         "roi": [30, 160, 660, 900],
+        "action": "Click",
+        "post_delay": 3500
+    },
+    "点击日常定位的生鲜超市入口": {
+        "recognition": "DirectHit",
+        "target": [270, 570],
         "action": "Click",
         "post_delay": 3500
     },
@@ -488,12 +632,9 @@
         "post_delay": 2500
     },
     "进货界面已打开": {
-        "recognition": "And",
-        "all_of": [
-            {"recognition": "OCR", "expected": "一键进货", "roi": [250, 900, 300, 250]},
-            {"recognition": "OCR", "expected": "体力|开始进货", "roi": [200, 850, 400, 400]}
-        ],
-        "box_index": 0,
+        "recognition": "OCR",
+        "expected": "体力",
+        "roi": [220, 900, 300, 110],
         "timeout": 10000
     },
     "一键进货已勾选": {
@@ -512,9 +653,8 @@
         "post_delay": 800
     },
     "开始进货": {
-        "recognition": "OCR",
-        "expected": "开始进货",
-        "roi": [180, 850, 400, 300],
+        "recognition": "DirectHit",
+        "target": [360, 875],
         "action": "Click",
         "post_delay": 1500
     },
@@ -541,6 +681,12 @@
         "recognition": "OCR",
         "expected": "幸运扭蛋",
         "roi": [550, 80, 170, 330],
+        "action": "Click",
+        "post_delay": 1200
+    },
+    "点击日常定位的幸运扭蛋入口": {
+        "recognition": "DirectHit",
+        "target": [650, 265],
         "action": "Click",
         "post_delay": 1200
     },
@@ -648,9 +794,12 @@
         "post_delay": 1000
     },
     "艺人宣传任务前往": {
-        "recognition": "OCR",
-        "expected": "艺人宣传3次",
-        "roi": [0, 180, 720, 1000],
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "艺人宣传3次", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
         "action": "Click",
         "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
@@ -667,7 +816,7 @@
     "影视城界面已打开": {
         "recognition": "And",
         "all_of": [
-            {"recognition": "OCR", "expected": "影视宣传|影视城", "roi": [0, 0, 720, 1100]},
+            {"recognition": "OCR", "expected": "影视宣发|影视宣传|影视城", "roi": [0, 0, 720, 1280]},
             {"recognition": "OCR", "expected": "艺人", "roi": [0, 500, 720, 700]}
         ],
         "box_index": 0,
@@ -680,11 +829,17 @@
         "action": "Click",
         "post_delay": 1000
     },
+    "点击日常定位的艺人入口": {
+        "recognition": "DirectHit",
+        "target": [335, 835],
+        "action": "Click",
+        "post_delay": 1000
+    },
     "艺人界面已打开": {
         "recognition": "And",
         "all_of": [
-            {"recognition": "OCR", "expected": "艺人", "roi": [20, 0, 260, 180]},
-            {"recognition": "OCR", "expected": "一键宣传|宣传", "roi": [500, 850, 220, 350]}
+            {"recognition": "OCR", "expected": "^艺人$", "roi": [20, 0, 260, 180]},
+            {"recognition": "OCR", "expected": "艺人数量|总魅力|默认排序", "roi": [0, 100, 720, 220]}
         ],
         "box_index": 0,
         "timeout": 10000
@@ -705,16 +860,15 @@
         "post_delay": 800
     },
     "宣传": {
-        "recognition": "OCR",
-        "expected": "^宣传$",
-        "roi": [540, 950, 180, 180],
+        "recognition": "DirectHit",
+        "target": [650, 1110],
         "action": "Click",
         "post_delay": 1200
     },
     "一键宣传结果弹层": {
         "recognition": "OCR",
-        "expected": "一键宣传|宣传成功",
-        "roi": [0, 250, 720, 900],
+        "expected": "点击任意处关闭",
+        "roi": [140, 980, 440, 180],
         "action": "DoNothing",
         "timeout": 10000
     },
@@ -725,9 +879,12 @@
         "post_delay": 1000
     },
     "伙伴升级任务前往": {
-        "recognition": "OCR",
-        "expected": "伙伴升级5次",
-        "roi": [0, 180, 720, 1000],
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "伙伴升级5次", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
         "action": "Click",
         "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
@@ -744,8 +901,8 @@
     "伙伴列表界面已打开": {
         "recognition": "And",
         "all_of": [
-            {"recognition": "OCR", "expected": "伙伴", "roi": [20, 0, 260, 180]},
-            {"recognition": "OCR", "expected": "伙伴数量|总能力|默认排序", "roi": [0, 130, 720, 300]}
+            {"recognition": "OCR", "expected": "^伙伴$", "roi": [20, 0, 260, 180]},
+            {"recognition": "OCR", "expected": "伙伴数量|总能力|默认排序", "roi": [0, 80, 720, 240]}
         ],
         "box_index": 0,
         "timeout": 10000
@@ -814,7 +971,7 @@
     "伙伴详情返回列表": {
         "recognition": "DirectHit",
         "action": "Click",
-        "target": [60, 1190],
+        "target": [45, 1235],
         "post_delay": 1000
     },
     "名媛会培育任务": {
