@@ -24,6 +24,7 @@ from maa.toolkit import AdbDevice, Toolkit
 SOURCE_DIR = Path(__file__).resolve().parent
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SOURCE_DIR))
 APPLICATION_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else SOURCE_DIR
+VERSION_PATH = BUNDLE_DIR / "VERSION"
 RESOURCE_DIR = BUNDLE_DIR / "resource"
 RUNTIME_DIR = APPLICATION_DIR / "runtime"
 OCR_DIR = RESOURCE_DIR / "model" / "ocr"
@@ -380,9 +381,12 @@ def distribution_self_check() -> None:
     """供便携包构建流程验证资源和 MaaFramework 原生库。"""
     from maa.library import Library
 
+    version = VERSION_PATH.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise RuntimeError("VERSION 必须使用 X.Y.Z 格式。")
     require_ocr_model()
-    version = Library.version()
-    if not version:
+    maa_version = Library.version()
+    if not maa_version:
         raise RuntimeError("无法读取 MaaFramework 版本。")
 
 

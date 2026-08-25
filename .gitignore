@@ -7,6 +7,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Local-only test suite (never publish to the remote repository)
+tests/
+
 # Local runtime data, credentials, logs, and debug screenshots
 runtime/
 
