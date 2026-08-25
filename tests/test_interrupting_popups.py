@@ -77,14 +77,12 @@ class TapAnywherePopupTests(unittest.TestCase):
 class UnknownPopupFallbackTests(unittest.TestCase):
     @patch("runner.capture_debug_step")
     @patch("runner.time.sleep")
-    @patch("runner.random.randint", side_effect=[250, 410, 300, 520])
-    @patch("runner._try_unknown_popup_random_click", return_value=True)
+    @patch("runner._try_unknown_popup_return_click", return_value=True)
     @patch("runner._task_succeeded", side_effect=[False, True])
-    def test_stops_random_clicks_as_soon_as_task_recovers(
+    def test_stops_return_clicks_as_soon_as_task_recovers(
         self,
         task_succeeded,
-        random_click,
-        randint,
+        return_click,
         sleep,
         capture_debug_step,
     ) -> None:
@@ -100,23 +98,22 @@ class UnknownPopupFallbackTests(unittest.TestCase):
         )
 
         self.assertTrue(recovered)
-        self.assertEqual(random_click.call_count, 2)
-        random_click.assert_called_with(unittest.mock.ANY, 300, 520)
+        self.assertEqual(return_click.call_count, 2)
+        return_click.assert_called_with(unittest.mock.ANY)
         self.assertEqual(task_succeeded.call_count, 2)
         self.assertIn("第 2 轮", reports[-1])
+        self.assertTrue(any("(50, 1230)" in report for report in reports))
         self.assertEqual(sleep.call_count, 2)
         capture_debug_step.assert_called()
 
     @patch("runner.capture_debug_step")
     @patch("runner.time.sleep")
-    @patch("runner.random.randint", side_effect=[300, 500] * 3)
-    @patch("runner._try_unknown_popup_random_click", return_value=True)
+    @patch("runner._try_unknown_popup_return_click", return_value=True)
     @patch("runner._task_succeeded", return_value=False)
     def test_returns_false_only_after_three_failed_rounds(
         self,
         task_succeeded,
-        random_click,
-        randint,
+        return_click,
         sleep,
         capture_debug_step,
     ) -> None:
@@ -125,7 +122,7 @@ class UnknownPopupFallbackTests(unittest.TestCase):
                 return entry
 
         self.assertFalse(try_unknown_popup_fallback(FakeTasker(), "打开测试页面"))
-        self.assertEqual(random_click.call_count, 3)
+        self.assertEqual(return_click.call_count, 3)
         self.assertEqual(task_succeeded.call_count, 3)
         self.assertEqual(sleep.call_count, 3)
 

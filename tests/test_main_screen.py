@@ -7,8 +7,8 @@ from runner import main_screen_is_reached, wait_for_main_screen
 
 
 class MainScreenRecognitionTests(unittest.TestCase):
-    @patch("runner._try_recognize_once", side_effect=[True, False, True])
-    def test_accepts_two_of_three_anchors_and_logs_each_result(
+    @patch("runner._try_recognize_once", side_effect=[True, False, True, True])
+    def test_accepts_two_of_three_navigation_anchors_with_fixed_entry(
         self,
         recognize_once,
     ) -> None:
@@ -21,12 +21,13 @@ class MainScreenRecognitionTests(unittest.TestCase):
         )
 
         self.assertTrue(reached)
-        self.assertEqual(recognize_once.call_count, 3)
+        self.assertEqual(recognize_once.call_count, 4)
         self.assertTrue(any("左下“百货”=命中" in line for line in reports))
         self.assertTrue(any("底部“关卡/伙伴”=未命中" in line for line in reports))
-        self.assertTrue(any("命中 2/3" in line and "结论=已到达" in line for line in reports))
+        self.assertTrue(any("右侧“日常/商店”=命中" in line for line in reports))
+        self.assertTrue(any("导航命中 2/3" in line and "结论=已到达" in line for line in reports))
 
-    @patch("runner._try_recognize_once", side_effect=[True, False, False])
+    @patch("runner._try_recognize_once", side_effect=[True, False, False, True])
     def test_rejects_one_of_three_anchors_with_detailed_summary(
         self,
         recognize_once,
@@ -36,7 +37,27 @@ class MainScreenRecognitionTests(unittest.TestCase):
         reached = main_screen_is_reached(object(), report=reports.append)
 
         self.assertFalse(reached)
-        self.assertTrue(any("命中 1/3" in line and "结论=未到达" in line for line in reports))
+        self.assertTrue(any("导航命中 1/3" in line and "结论=未到达" in line for line in reports))
+
+    @patch("runner._try_recognize_once", side_effect=[True, True, True, False])
+    def test_rejects_subpage_even_when_all_navigation_anchors_match(
+        self,
+        recognize_once,
+    ) -> None:
+        reports: list[str] = []
+
+        reached = main_screen_is_reached(object(), report=reports.append)
+
+        self.assertFalse(reached)
+        self.assertEqual(recognize_once.call_count, 4)
+        self.assertTrue(
+            any(
+                "导航命中 3/3" in line
+                and "右侧“日常/商店”:×" in line
+                and "结论=未到达" in line
+                for line in reports
+            )
+        )
 
     @patch("runner.capture_debug_step")
     @patch("runner.main_screen_is_reached", return_value=True)

@@ -572,7 +572,7 @@
     "私人会馆兑换任务前往": {
         "recognition": "And",
         "all_of": [
-            {"recognition": "OCR", "expected": "私人会馆商店兑换1次商品", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "私人会馆商店兑换1次(?:商品)?", "roi": [0, 180, 540, 1000]},
             {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
         ],
         "box_index": 0,
@@ -583,7 +583,7 @@
     "私人会馆兑换任务已完成": {
         "recognition": "And",
         "all_of": [
-            {"recognition": "OCR", "expected": "私人会馆商店兑换1次商品", "roi": [0, 180, 720, 1000]},
+            {"recognition": "OCR", "expected": "私人会馆商店兑换1次(?:商品)?", "roi": [0, 180, 720, 1000]},
             {"recognition": "OCR", "expected": "1/1|已完成|已领取|^领取$", "roi": [0, 180, 720, 1000]}
         ],
         "box_index": 0,
@@ -736,12 +736,11 @@
         "target": [50, 1230],
         "post_delay": 1000
     },
-    "点击私人会馆": {
-        "recognition": "OCR",
-        "expected": "私人会馆",
-        "roi": [80, 650, 260, 420],
+    "点击主页私人会馆入口": {
+        "recognition": "DirectHit",
+        "target": [175, 750],
         "action": "Click",
-        "post_delay": 1200
+        "post_delay": 2500
     },
     "私人会馆界面已打开": {
         "recognition": "OCR",
@@ -759,21 +758,17 @@
     "兑换商店界面已打开": {
         "recognition": "And",
         "all_of": [
-            {"recognition": "OCR", "expected": "商店", "roi": [0, 100, 250, 250]},
-            {"recognition": "OCR", "expected": "会馆|分钟卡", "roi": [0, 250, 720, 1000]}
+            {"recognition": "OCR", "expected": "^会馆$", "roi": [0, 140, 180, 120]},
+            {"recognition": "OCR", "expected": "分钟卡", "roi": [20, 220, 220, 320]}
         ],
         "box_index": 0,
         "timeout": 10000
     },
     "点击分钟卡价格": {
-        "recognition": "And",
-        "all_of": [
-            {"recognition": "OCR", "expected": "分钟卡", "roi": [20, 300, 300, 430]},
-            {"recognition": "OCR", "expected": "100", "roi": [20, 430, 300, 300]}
-        ],
-        "box_index": 1,
+        "recognition": "DirectHit",
+        "target": [140, 470],
         "action": "Click",
-        "post_delay": 800
+        "post_delay": 1500
     },
     "分钟卡兑换界面已打开": {
         "recognition": "And",
@@ -804,7 +799,7 @@
         "target": [50, 1230],
         "post_delay": 800
     },
-    "私人会馆返回百货": {
+    "私人会馆返回主页": {
         "recognition": "DirectHit",
         "action": "Click",
         "target": [50, 1230],
@@ -1007,11 +1002,10 @@
         "action": "DoNothing"
     },
     "领取日常100活跃礼包": {
-        "recognition": "OCR",
-        "expected": "100",
-        "roi": [560, 300, 160, 300],
+        "recognition": "DirectHit",
+        "target": [610, 320],
         "action": "Click",
-        "post_delay": 1000
+        "post_delay": 1500
     },
     "日常100活跃礼包结果弹层": {
         "recognition": "OCR",

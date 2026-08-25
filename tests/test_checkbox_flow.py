@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from runner import ensure_checkbox_selected, factory_auto_research_selection
+from runner import (
+    FACTORY_AUTO_RESEARCH_FIXED_CENTER,
+    ensure_checkbox_selected,
+    factory_auto_research_selection,
+    factory_auto_research_selection_at_center,
+)
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -63,6 +68,23 @@ class CheckboxLoggingTests(unittest.TestCase):
 
 
 class FactoryAutoResearchCheckboxTests(unittest.TestCase):
+    def test_detects_green_check_at_fixed_factory_position(self) -> None:
+        image = np.zeros((1280, 720, 3), dtype=np.uint8)
+        center_x, center_y = FACTORY_AUTO_RESEARCH_FIXED_CENTER
+        image[center_y - 3 : center_y + 4, center_x - 3 : center_x + 4] = (
+            70,
+            220,
+            90,
+        )
+
+        selected, green_count = factory_auto_research_selection_at_center(
+            image,
+            FACTORY_AUTO_RESEARCH_FIXED_CENTER,
+        )
+
+        self.assertTrue(selected)
+        self.assertGreaterEqual(green_count, 5)
+
     def test_uses_only_green_pixels_inside_checkbox_center(self) -> None:
         text_box = (100, 100, 80, 20)
         unselected = np.zeros((200, 200, 3), dtype=np.uint8)

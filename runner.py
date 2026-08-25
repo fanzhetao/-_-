@@ -90,6 +90,9 @@ DAILY_STATE_TODO = "待完成"
 DAILY_STATE_CLAIMABLE = "可领取"
 DAILY_STATE_CLAIMED = "已领取"
 DAILY_STATE_UNKNOWN = "未识别"
+DAILY_TASK_LABEL_ALIASES = {
+    "私人会馆商店兑换1次商品": ("私人会馆商店兑换1次",),
+}
 FACTORY_RESEARCH_TARGET_COUNT = 7
 FACTORY_STATE_MAX_TRANSITIONS = 40
 FACTORY_STATE_RECOGNITION_TIMEOUT_MS = 2000
@@ -163,7 +166,7 @@ DAILY_TASK_SPECS = (
         "club_exchange",
         "私人会馆商店兑换1次商品",
         "私人会馆兑换任务前往",
-        "私人会馆界面已打开",
+        "主界面已到达",
         "百货",
     ),
     DailyTaskSpec(
@@ -1517,6 +1520,16 @@ def _normalize_daily_ocr_text(value: str) -> str:
     return re.sub(r"\s+", "", value)
 
 
+def _daily_task_label_matches(ocr_text: str, task_label: str) -> bool:
+    """兼容任务标题因 UI 换行而被 OCR 拆成多个文本框。"""
+    normalized_text = _normalize_daily_ocr_text(ocr_text)
+    candidates = (task_label, *DAILY_TASK_LABEL_ALIASES.get(task_label, ()))
+    return any(
+        _normalize_daily_ocr_text(candidate) in normalized_text
+        for candidate in candidates
+    )
+
+
 def collect_daily_viewport_ocr(tasker: Tasker) -> list[DailyOcrText]:
     """读取当前日常视口的全部 OCR 文本及位置，供同行状态关联。"""
     entry = "日常列表OCR盘点"
@@ -1585,7 +1598,7 @@ def classify_daily_viewport(
         title_boxes = [
             item
             for item in ocr_texts
-            if _normalize_daily_ocr_text(spec.label) in item.text
+            if _daily_task_label_matches(item.text, spec.label)
         ]
         best_match: tuple[int, str] | None = None
         for title in title_boxes:
@@ -1607,8 +1620,9 @@ def daily_forward_button_center(
     task_label: str,
 ) -> tuple[int, int] | None:
     """返回与目标任务标题纵向最接近的同行“前往”文本框中心。"""
-    normalized_label = _normalize_daily_ocr_text(task_label)
-    titles = [item for item in ocr_texts if normalized_label in item.text]
+    titles = [
+        item for item in ocr_texts if _daily_task_label_matches(item.text, task_label)
+    ]
     forwards = [
         item
         for item in ocr_texts
@@ -1664,7 +1678,10 @@ def inventory_daily_tasks(
         relevant = [
             item
             for item in ocr_texts
-            if any(_normalize_daily_ocr_text(spec.label) in item.text for spec in DAILY_TASK_SPECS)
+            if any(
+                _daily_task_label_matches(item.text, spec.label)
+                for spec in DAILY_TASK_SPECS
+            )
             or "前往" in item.text
             or "领取" in item.text
         ]
@@ -2575,22 +2592,24 @@ def complete_commercial_daily_group(
 
     if "club_exchange" in pending:
         if at_department_store:
-            run_confirmed_transition(
-                tasker,
-                "点击私人会馆",
-                "私人会馆界面已打开",
-                report,
-                cancel_event,
-            )
+            click_bottom_commercial_street(tasker, report, cancel_event)
+            at_department_store = False
         else:
             run_daily_forward(
                 tasker,
                 controller,
                 "私人会馆兑换任务前往",
-                "私人会馆界面已打开",
+                "主界面已到达",
                 report,
                 cancel_event,
             )
+        run_confirmed_transition(
+            tasker,
+            "点击主页私人会馆入口",
+            "私人会馆界面已打开",
+            report,
+            cancel_event,
+        )
         run_confirmed_transition(
             tasker, "点击兑换", "兑换商店界面已打开", report, cancel_event
         )
@@ -2610,13 +2629,13 @@ def complete_commercial_daily_group(
         )
         run_confirmed_transition(
             tasker,
-            "私人会馆返回百货",
-            "百货界面已打开",
+            "私人会馆返回主页",
+            "主界面已到达",
             report,
             cancel_event,
         )
-        at_department_store = True
         report("[日常计划] 已执行：私人会馆商店兑换1次商品")
+        return_to_daily(tasker, report, cancel_event)
 
     if at_department_store:
         click_bottom_commercial_street(tasker, report, cancel_event)
@@ -2752,7 +2771,7 @@ def claim_daily_completion_and_exit(
     report: Reporter = print,
     cancel_event=None,
 ) -> bool:
-    """领取可领取任务和 100 活跃礼包；活跃度不足时绝不退出。"""
+    """领取可领取任务和 100 活跃礼包；礼包领取后即为完全完成。"""
     claim_all_daily_rewards(tasker, controller, report, cancel_event)
     if not try_recognize(
         tasker,
@@ -2773,7 +2792,9 @@ def claim_daily_completion_and_exit(
     ):
         report("[退出] 奖励层关闭后未能确认日常页面，保守保留游戏运行")
         return False
-    return close_game_application(device, report)
+    report("[日常] 已领取最右侧 100 活跃礼包并关闭奖励层，任务完全完成")
+    close_game_application(device, report)
+    return True
 
 
 def close_game_application(device, report: Reporter = print) -> bool:
@@ -2803,7 +2824,10 @@ def close_game_application(device, report: Reporter = print) -> bool:
         report("[退出] 未确认游戏包名，保留游戏运行")
         return False
     run_adb_shell_from_stdin(device, f"am force-stop {package}", "关闭游戏应用")
-    report(f"[退出] 已关闭游戏应用（{package}），未关闭模拟器")
+    report(
+        f"[退出] 已关闭游戏应用（{package}）；"
+        "未关闭模拟器，自动化客户端保持打开"
+    )
     return True
 
 
@@ -3155,9 +3179,12 @@ def run_automation(
         )
         report("[日常计划] 名媛会培育、商战、环球差旅、伙伴培训按本轮要求暂不执行")
         if not claim_daily_completion_and_exit(tasker, controller, device, report, cancel_event):
-            report("已完成当前可执行日常流程；最终完成条件或退出确认未满足，游戏保持运行。")
+            report("已完成当前可执行日常流程；100 活跃礼包领取条件未确认满足，尚未完全完成。")
         else:
-            report("已完成日常奖励扫描、100 活跃礼包领取并退出游戏。")
+            report(
+                "已领取日常 100 活跃礼包，任务已完全完成；"
+                "游戏关闭流程已执行，自动化客户端保持打开。"
+            )
     finally:
         _ACTIVE_STEP_SCREENSHOT_RECORDER = None
 
