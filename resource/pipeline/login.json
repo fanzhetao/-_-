@@ -202,10 +202,10 @@
         "action": "Click",
         "target": [360, 640]
     },
-    "未知弹窗随机点击": {
+    "未知弹窗固定返回点击": {
         "recognition": "DirectHit",
         "action": "Click",
-        "target": [360, 640]
+        "target": [50, 1230]
     },
     "勾选任意活动今天不再提示固定位置": {
         "recognition": "DirectHit",
@@ -278,6 +278,11 @@
                 "recognition": "OCR",
                 "expected": "影视城|背包",
                 "roi": [420, 1080, 300, 200]
+            },
+            {
+                "recognition": "OCR",
+                "expected": "日常|商店",
+                "roi": [570, 850, 150, 330]
             }
         ],
         "box_index": 0
@@ -298,6 +303,12 @@
         "recognition": "OCR",
         "expected": "影视城|背包",
         "roi": [420, 1080, 300, 200],
+        "action": "DoNothing"
+    },
+    "主界面锚点日常商店": {
+        "recognition": "OCR",
+        "expected": "日常|商店",
+        "roi": [570, 850, 150, 330],
         "action": "DoNothing"
     },
     "点击日常": {
@@ -716,7 +727,7 @@
     "幸运扭蛋返回百货": {
         "recognition": "DirectHit",
         "action": "Click",
-        "target": [60, 1190],
+        "target": [50, 1230],
         "post_delay": 1000
     },
     "点击私人会馆": {
@@ -784,13 +795,13 @@
     "兑换商店返回私人会馆": {
         "recognition": "DirectHit",
         "action": "Click",
-        "target": [60, 1190],
+        "target": [50, 1230],
         "post_delay": 800
     },
     "私人会馆返回百货": {
         "recognition": "DirectHit",
         "action": "Click",
-        "target": [60, 1190],
+        "target": [50, 1230],
         "post_delay": 1000
     },
     "艺人宣传任务前往": {
@@ -875,7 +886,7 @@
     "艺人返回影视城": {
         "recognition": "DirectHit",
         "action": "Click",
-        "target": [60, 1190],
+        "target": [50, 1230],
         "post_delay": 1000
     },
     "伙伴升级任务前往": {

@@ -5,7 +5,6 @@ from getpass import getpass
 import json
 import os
 from pathlib import Path
-import random
 import re
 import shlex
 import shutil
@@ -59,14 +58,17 @@ INTERRUPTING_POPUP_ENTRIES = {
     "任意活动稍后再去弹窗",
 }
 UNKNOWN_POPUP_FALLBACK_ROUNDS = 3
-UNKNOWN_POPUP_CLICK_X_RANGE = (240, 480)
-UNKNOWN_POPUP_CLICK_Y_RANGE = (350, 700)
+UNKNOWN_POPUP_FALLBACK_RETURN_POSITION = (50, 1230)
 UNKNOWN_POPUP_CLICK_SETTLE_SECONDS = 0.75
 UNKNOWN_POPUP_FALLBACK_EXCLUDED_ENTRIES = {"打开游戏到登录页"}
 MAIN_SCREEN_ANCHORS = (
     ("主界面锚点百货", "左下“百货”"),
     ("主界面锚点关卡伙伴", "底部“关卡/伙伴”"),
     ("主界面锚点影视城背包", "底部“影视城/背包”"),
+)
+MAIN_SCREEN_FIXED_ENTRY_ANCHOR = (
+    "主界面锚点日常商店",
+    "右侧“日常/商店”",
 )
 MAIN_SCREEN_REQUIRED_ANCHORS = 2
 MAIN_SCREEN_INITIAL_CHECK_ROUNDS = 3
@@ -788,9 +790,10 @@ def main_screen_is_reached(
     total_timeout_ms: int = 1500,
     context: str = "检查",
 ) -> bool:
-    """逐项记录主界面锚点，以多数命中避免单个艺术字偶发漏识别。"""
+    """底部导航多数命中且主页固定入口命中时，才确认到达主界面。"""
     ensure_not_cancelled(cancel_event)
-    per_anchor_timeout_ms = max(1, total_timeout_ms // len(MAIN_SCREEN_ANCHORS))
+    total_checks = len(MAIN_SCREEN_ANCHORS) + 1
+    per_anchor_timeout_ms = max(1, total_timeout_ms // total_checks)
     results: list[tuple[str, bool]] = []
     for entry, label in MAIN_SCREEN_ANCHORS:
         ensure_not_cancelled(cancel_event)
@@ -805,15 +808,29 @@ def main_screen_is_reached(
             f"{'命中' if matched else '未命中'}"
         )
 
+    fixed_entry, fixed_label = MAIN_SCREEN_FIXED_ENTRY_ANCHOR
+    ensure_not_cancelled(cancel_event)
+    fixed_entry_matched = _try_recognize_once(
+        tasker,
+        fixed_entry,
+        timeout_ms=per_anchor_timeout_ms,
+    )
+    report(
+        f"[主界面识别] {context}：{fixed_label}="
+        f"{'命中' if fixed_entry_matched else '未命中'}"
+    )
+
     matched_count = sum(matched for _, matched in results)
-    reached = matched_count >= MAIN_SCREEN_REQUIRED_ANCHORS
+    navigation_reached = matched_count >= MAIN_SCREEN_REQUIRED_ANCHORS
+    reached = navigation_reached and fixed_entry_matched
     summary = "，".join(
         f"{label}:{'✓' if matched else '×'}" for label, matched in results
     )
     report(
         f"[主界面识别] {context}汇总：{summary}；"
-        f"命中 {matched_count}/{len(results)}，"
-        f"要求至少 {MAIN_SCREEN_REQUIRED_ANCHORS} 项，"
+        f"导航命中 {matched_count}/{len(results)}，"
+        f"要求至少 {MAIN_SCREEN_REQUIRED_ANCHORS} 项；"
+        f"{fixed_label}:{'✓' if fixed_entry_matched else '×'}（必须命中），"
         f"结论={'已到达' if reached else '未到达'}"
     )
     return reached
@@ -827,7 +844,7 @@ def wait_for_main_screen(
     report(
         "[主界面识别] 开始确认主界面："
         f"{len(MAIN_SCREEN_ANCHORS)} 个锚点中至少命中 "
-        f"{MAIN_SCREEN_REQUIRED_ANCHORS} 个"
+        f"{MAIN_SCREEN_REQUIRED_ANCHORS} 个，且必须命中右侧固定入口"
     )
     for round_number in range(1, MAIN_SCREEN_INITIAL_CHECK_ROUNDS + 1):
         if main_screen_is_reached(
@@ -866,13 +883,15 @@ def wait_for_main_screen(
 
     capture_debug_step("主界面详细识别最终失败")
     raise RuntimeError(
-        "主界面识别失败：三个导航锚点连续检查及未知弹窗兜底后，"
-        f"仍未达到至少 {MAIN_SCREEN_REQUIRED_ANCHORS} 项命中的要求。"
+        "主界面识别失败：连续检查及未知弹窗兜底后，"
+        f"仍未达到至少 {MAIN_SCREEN_REQUIRED_ANCHORS} 个导航锚点"
+        "且命中右侧固定入口的要求。"
     )
 
 
-def _try_unknown_popup_random_click(tasker: Tasker, x: int, y: int) -> bool:
-    entry = "未知弹窗随机点击"
+def _try_unknown_popup_return_click(tasker: Tasker) -> bool:
+    entry = "未知弹窗固定返回点击"
+    x, y = UNKNOWN_POPUP_FALLBACK_RETURN_POSITION
     override = {
         entry: {
             "next": [],
@@ -884,7 +903,7 @@ def _try_unknown_popup_random_click(tasker: Tasker, x: int, y: int) -> bool:
     }
     succeeded = _task_succeeded(tasker.post_task(entry, override))
     if succeeded:
-        capture_debug_step(f"完成未知弹窗随机点击：({x}, {y})")
+        capture_debug_step(f"完成未知弹窗固定返回点击：({x}, {y})")
     return succeeded
 
 
@@ -894,22 +913,21 @@ def try_unknown_popup_fallback(
     report: Reporter = print,
     cancel_event=None,
 ) -> bool:
-    """最多随机点击三轮；每轮后重新执行原任务，成功即停止点击。"""
+    """最多点击左下返回键三轮；每轮后重新执行原任务，成功即停止点击。"""
     report(
         f"[未知弹窗兜底] {entry} 未识别成功，"
-        f"开始最多 {UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮随机点击恢复"
+        f"开始最多 {UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮固定返回点击恢复"
     )
     for round_number in range(1, UNKNOWN_POPUP_FALLBACK_ROUNDS + 1):
         ensure_not_cancelled(cancel_event)
-        x = random.randint(*UNKNOWN_POPUP_CLICK_X_RANGE)
-        y = random.randint(*UNKNOWN_POPUP_CLICK_Y_RANGE)
+        x, y = UNKNOWN_POPUP_FALLBACK_RETURN_POSITION
         report(
             f"[未知弹窗兜底] 第 {round_number}/{UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮，"
-            f"点击安全区域随机位置 ({x}, {y})"
+            f"点击左下返回键固定位置 ({x}, {y})"
         )
-        if not _try_unknown_popup_random_click(tasker, x, y):
+        if not _try_unknown_popup_return_click(tasker):
             capture_debug_step(
-                f"未知弹窗随机点击失败：第 {round_number} 轮 ({x}, {y})"
+                f"未知弹窗固定返回点击失败：第 {round_number} 轮 ({x}, {y})"
             )
             continue
 
@@ -938,7 +956,7 @@ def try_unknown_popup_fallback(
         )
 
     report(
-        f"[未知弹窗兜底] 已完成 {UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮随机点击，"
+        f"[未知弹窗兜底] 已完成 {UNKNOWN_POPUP_FALLBACK_ROUNDS} 轮固定返回点击，"
         f"原任务仍未识别成功：{entry}"
     )
     return False
