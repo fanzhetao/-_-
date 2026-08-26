@@ -141,6 +141,21 @@ PARTNER_CANDIDATE_ENTRIES = (
     "点击第五个伙伴",
     "点击第四个伙伴",
 )
+CULTIVATION_LEVELS = ("入门培育", "初级培育", "中级培育", "高级培育")
+DEFAULT_CULTIVATION_LEVEL = CULTIVATION_LEVELS[0]
+CULTIVATION_ACTION_ENTRIES = {
+    "入门培育": "执行入门培育",
+    "初级培育": "执行初级培育",
+    "中级培育": "执行中级培育",
+    "高级培育": "执行高级培育",
+}
+DEBUTANTE_ENTRY_OCR_ATTEMPTS = 12
+DEBUTANTE_ENTRY_OCR_TIMEOUT_MS = 250
+DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS = 0.15
+MANOR_SUPPLY_ENTRY_OCR_ATTEMPTS = 12
+MANOR_SUPPLY_ENTRY_OCR_TIMEOUT_MS = 500
+MANOR_SUPPLY_ENTRY_POLL_INTERVAL_SECONDS = 0.15
+DISABLED_DAILY_TASK_KEYS = {"partner_upgrade"}
 Reporter = Callable[[str], None]
 
 
@@ -201,6 +216,13 @@ DAILY_TASK_SPECS = (
         "伙伴升级任务前往",
         "伙伴列表界面已打开",
         "伙伴",
+    ),
+    DailyTaskSpec(
+        "lady_cultivation",
+        "名媛会培育1次",
+        "名媛会培育任务前往",
+        "主界面已到达",
+        "名媛会",
     ),
     DailyTaskSpec(
         "factory_research",
@@ -292,6 +314,20 @@ def load_local_config() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def normalize_cultivation_level(value) -> str:
+    normalized = str(value or "").strip()
+    return normalized if normalized in CULTIVATION_LEVELS else DEFAULT_CULTIVATION_LEVEL
+
+
+def validate_cultivation_level(value) -> str:
+    normalized = str(value or "").strip()
+    if normalized not in CULTIVATION_LEVELS:
+        raise RuntimeError(
+            "花房培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
+        )
+    return normalized
+
+
 def load_account_configs(config: dict | None = None) -> list[dict]:
     """读取多账号配置，并兼容旧版单账号配置结构。"""
     if config is None:
@@ -312,6 +348,9 @@ def load_account_configs(config: dict | None = None) -> list[dict]:
                     "account": str(item.get("account", "")).strip(),
                     "password": str(item.get("password", "")),
                     "server_number": server_number,
+                    "cultivation_level": normalize_cultivation_level(
+                        item.get("cultivation_level")
+                    ),
                     "active": bool(item.get("active", True)),
                 }
             )
@@ -330,6 +369,9 @@ def load_account_configs(config: dict | None = None) -> list[dict]:
                 "account": account,
                 "password": password,
                 "server_number": server_number,
+                "cultivation_level": normalize_cultivation_level(
+                    config.get("cultivation_level")
+                ),
                 "active": True,
             }
         ]
@@ -346,11 +388,15 @@ def save_account_configs(accounts: list[dict]) -> None:
         validate_credential(account, "账号")
         validate_credential(password, "密码")
         validate_server_number(server_number)
+        cultivation_level = validate_cultivation_level(
+            item.get("cultivation_level", DEFAULT_CULTIVATION_LEVEL)
+        )
         normalized_accounts.append(
             {
                 "account": account,
                 "password": password,
                 "server_number": server_number,
+                "cultivation_level": cultivation_level,
                 "active": bool(item.get("active", True)),
             }
         )
@@ -365,13 +411,19 @@ def save_account_configs(accounts: list[dict]) -> None:
     temp_path.replace(CLIENT_CONFIG_PATH)
 
 
-def save_local_config(account: str, password: str, server_number: int) -> None:
+def save_local_config(
+    account: str,
+    password: str,
+    server_number: int,
+    cultivation_level: str = DEFAULT_CULTIVATION_LEVEL,
+) -> None:
     save_account_configs(
         [
             {
                 "account": account,
                 "password": password,
                 "server_number": server_number,
+                "cultivation_level": cultivation_level,
                 "active": True,
             }
         ]
@@ -2000,7 +2052,10 @@ def inventory_daily_tasks(
     for spec in DAILY_TASK_SPECS:
         state = states.get(spec.key, DAILY_STATE_UNKNOWN)
         plan[spec.key] = state
-        decision = "执行" if state == DAILY_STATE_TODO else "跳过"
+        if spec.key in DISABLED_DAILY_TASK_KEYS:
+            decision = "停用（保留实现）"
+        else:
+            decision = "执行" if state == DAILY_STATE_TODO else "跳过"
         report(
             f"[日常计划] {spec.label}：状态={state}，决策={decision}"
         )
@@ -3092,6 +3147,243 @@ def complete_partner_daily_group(
     return_to_daily(tasker, report, cancel_event)
 
 
+def enter_debutante_club_from_main(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """高频识别可能被引导手指遮挡的“名媛会”，失败后固定位置兜底。"""
+    report(
+        "[名媛会入口] 开始高频识别可能被引导手指遮挡的“名媛会”"
+    )
+    for attempt in range(1, DEBUTANTE_ENTRY_OCR_ATTEMPTS + 1):
+        ensure_not_cancelled(cancel_event)
+        if _try_execute_once(
+            tasker,
+            "点击主页名媛会入口",
+            timeout_ms=DEBUTANTE_ENTRY_OCR_TIMEOUT_MS,
+        ):
+            report(
+                f"[名媛会入口] 第 {attempt}/{DEBUTANTE_ENTRY_OCR_ATTEMPTS} 次"
+                "识别成功并点击"
+            )
+            time.sleep(0.5)
+            if _try_recognize_once(
+                tasker,
+                "名媛会界面已打开",
+                timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+            ):
+                report("[名媛会入口] 已确认进入名媛会")
+                capture_debug_step("已通过高频OCR进入名媛会")
+                return
+        else:
+            report(
+                f"[名媛会入口] 第 {attempt}/{DEBUTANTE_ENTRY_OCR_ATTEMPTS} 次"
+                "暂未识别"
+            )
+        time.sleep(DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS)
+
+    report("[名媛会入口] 多次 OCR 未完成跳转，使用校准固定位置兜底")
+    run_confirmed_transition(
+        tasker,
+        "点击主页名媛会入口固定位置",
+        "名媛会界面已打开",
+        report,
+        cancel_event,
+    )
+    report("[名媛会入口] 固定位置兜底后已确认进入名媛会")
+
+
+def complete_lady_cultivation_daily(
+    tasker: Tasker,
+    controller: AdbController,
+    daily_plan: dict[str, str],
+    cultivation_level: str,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    cultivation_level = validate_cultivation_level(cultivation_level)
+    if daily_plan.get("lady_cultivation") != DAILY_STATE_TODO:
+        report(
+            "[日常计划] 跳过名媛会培育1次："
+            f"状态={daily_plan.get('lady_cultivation', DAILY_STATE_UNKNOWN)}"
+        )
+        return
+
+    report(f"[日常计划] 执行名媛会培育1次；档位={cultivation_level}")
+    run_daily_forward(
+        tasker,
+        controller,
+        "名媛会培育任务前往",
+        "主界面已到达",
+        report,
+        cancel_event,
+    )
+    enter_debutante_club_from_main(tasker, report, cancel_event)
+    run_confirmed_transition(
+        tasker,
+        "点击花房培育",
+        "花房培育界面已打开",
+        report,
+        cancel_event,
+    )
+    action_entry = CULTIVATION_ACTION_ENTRIES[cultivation_level]
+    report(f"[花房培育] 选择{cultivation_level}")
+    run_task(tasker, action_entry, report, cancel_event)
+    dismiss_result_overlay(
+        tasker,
+        controller,
+        "花房培育恭喜获得弹层",
+        report,
+        cancel_event,
+    )
+    run_task(tasker, "花房培育界面已打开", report, cancel_event)
+    run_confirmed_transition(
+        tasker,
+        "花房培育返回名媛会",
+        "名媛会界面已打开",
+        report,
+        cancel_event,
+    )
+    report(f"[日常计划] 已执行：名媛会培育1次（{cultivation_level}）")
+
+
+def enter_manor_supply_from_debutante_club(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """按 OCR 返回的动态位置点击“庄园补给”，不使用固定位置。"""
+    report("[庄园补给入口] 开始按动态 OCR 位置查找“庄园补给”")
+    for attempt in range(1, MANOR_SUPPLY_ENTRY_OCR_ATTEMPTS + 1):
+        ensure_not_cancelled(cancel_event)
+        if _try_execute_once(
+            tasker,
+            "点击庄园补给动态入口",
+            timeout_ms=MANOR_SUPPLY_ENTRY_OCR_TIMEOUT_MS,
+        ):
+            report(
+                f"[庄园补给入口] 第 {attempt}/{MANOR_SUPPLY_ENTRY_OCR_ATTEMPTS} 次"
+                "识别成功并按文字位置点击"
+            )
+            confirm_transition(
+                tasker,
+                "点击庄园补给动态入口",
+                "庄园补给界面已打开",
+                report,
+                cancel_event,
+            )
+            return
+        report(
+            f"[庄园补给入口] 第 {attempt}/{MANOR_SUPPLY_ENTRY_OCR_ATTEMPTS} 次"
+            "暂未识别；不使用固定坐标"
+        )
+        time.sleep(MANOR_SUPPLY_ENTRY_POLL_INTERVAL_SECONDS)
+
+    capture_debug_step("庄园补给动态入口多次OCR未识别")
+    raise RuntimeError(
+        "连续多次仍未通过 OCR 识别到动态位置的“庄园补给”，已停止后续操作。"
+    )
+
+
+def read_manor_supply_bargain_price(tasker: Tasker) -> int | None:
+    """读取讲价后的红色价格；只返回带符号或无符号的完整整数。"""
+    entry = "庄园补给讲价价格OCR"
+    override = {
+        entry: {
+            "recognition": "OCR",
+            "expected": "[-−–—]?[0-9]+",
+            "action": "DoNothing",
+            "next": [],
+            "pre_delay": 0,
+            "post_delay": 0,
+            "timeout": 2000,
+        }
+    }
+    job = tasker.post_task(entry, override)
+    job.wait()
+    if not job.succeeded:
+        return None
+    detail = job.get()
+    if detail is None:
+        return None
+
+    for node in detail.nodes:
+        recognition = node.recognition
+        if recognition is None:
+            continue
+        for result in recognition.all_results:
+            text = getattr(result, "text", None)
+            if not text:
+                continue
+            normalized = re.sub(r"\s+", "", str(text)).translate(
+                str.maketrans({"−": "-", "–": "-", "—": "-"})
+            )
+            match = re.fullmatch(r"-?\d+", normalized)
+            if match is not None:
+                return int(normalized)
+    return None
+
+
+def complete_manor_supply(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> bool:
+    """完成讲价；仅在红框价格明确为负数时购买，最后返回主页。"""
+    enter_manor_supply_from_debutante_club(tasker, report, cancel_event)
+    run_task(tasker, "点击庄园补给讲价", report, cancel_event)
+    report("[庄园补给] 已点击讲价；不识别角色弹层，点击安全位置继续")
+    wait_job(controller.post_click(80, 220), "关闭庄园补给讲价角色弹层")
+    time.sleep(0.5)
+    run_task(tasker, "庄园补给讲价后界面", report, cancel_event)
+
+    price = read_manor_supply_bargain_price(tasker)
+    purchased = False
+    if price is None:
+        report("[庄园补给] 红框价格未能可靠识别，按安全规则不购买")
+    elif price >= 0:
+        report(f"[庄园补给] 红框价格={price}，不是负数，不购买")
+    else:
+        report(f"[庄园补给] 红框价格={price}，确认是负数，允许购买")
+        run_confirmed_transition(
+            tasker,
+            "点击庄园补给买买买",
+            "庄园补给购买确认弹窗",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "确认购买庄园补给", report, cancel_event)
+        dismiss_result_overlay(
+            tasker,
+            controller,
+            "庄园补给购买恭喜获得弹层",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "庄园补给已购买界面", report, cancel_event)
+        purchased = True
+        report("[庄园补给] 已确认购买完成并返回已购买界面")
+
+    run_confirmed_transition(
+        tasker,
+        "关闭庄园补给",
+        "名媛会界面已打开",
+        report,
+        cancel_event,
+    )
+    run_confirmed_transition(
+        tasker,
+        "名媛会返回主页",
+        "主界面已到达",
+        report,
+        cancel_event,
+    )
+    report("[庄园补给] 已关闭补给界面并返回主页")
+    return purchased
+
+
 def claim_daily_completion_and_exit(
     tasker: Tasker,
     controller: AdbController,
@@ -3421,6 +3713,7 @@ def run_automation(
     account: str,
     password: str,
     server_number: int = 1,
+    cultivation_level: str = DEFAULT_CULTIVATION_LEVEL,
     device=None,
     report: Reporter = print,
     cancel_event=None,
@@ -3431,6 +3724,7 @@ def run_automation(
     validate_credential(account, "账号")
     validate_credential(password, "密码")
     validate_server_number(server_number)
+    cultivation_level = validate_cultivation_level(cultivation_level)
     ensure_not_cancelled(cancel_event)
 
     prepare_secure_runtime()
@@ -3514,13 +3808,22 @@ def run_automation(
         complete_artist_daily_group(
             tasker, controller, daily_plan, report, cancel_event
         )
-        complete_partner_daily_group(
-            tasker, controller, daily_plan, report, cancel_event
-        )
+        report("[日常计划] 伙伴升级5次已停用；原实现保留但本轮不调用")
         complete_factory_research_daily(
             tasker, controller, daily_plan, report, cancel_event
         )
-        report("[日常计划] 名媛会培育、商战、环球差旅、伙伴培训按本轮要求暂不执行")
+        complete_lady_cultivation_daily(
+            tasker,
+            controller,
+            daily_plan,
+            cultivation_level,
+            report,
+            cancel_event,
+        )
+        if daily_plan.get("lady_cultivation") == DAILY_STATE_TODO:
+            complete_manor_supply(tasker, controller, report, cancel_event)
+            return_to_daily(tasker, report, cancel_event)
+        report("[日常计划] 商战、环球差旅、伙伴培训按本轮要求暂不执行")
         if not claim_daily_completion_and_exit(tasker, controller, device, report, cancel_event):
             report("已完成当前可执行日常流程；100 活跃礼包领取条件未确认满足，尚未完全完成。")
             return False
@@ -3549,6 +3852,7 @@ def main() -> None:
                 "account": account,
                 "password": password,
                 "server_number": server_number,
+                "cultivation_level": DEFAULT_CULTIVATION_LEVEL,
                 "active": True,
             }
         ]
@@ -3559,6 +3863,9 @@ def main() -> None:
             account_config["account"],
             account_config["password"],
             server_number=account_config["server_number"],
+            cultivation_level=account_config.get(
+                "cultivation_level", DEFAULT_CULTIVATION_LEVEL
+            ),
             device=device,
         )
         if not completed:

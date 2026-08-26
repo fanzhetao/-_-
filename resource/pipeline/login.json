@@ -1009,6 +1009,180 @@
         "roi": [0, 180, 720, 1000],
         "action": "DoNothing"
     },
+    "名媛会培育任务前往": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "名媛会培育1次", "roi": [0, 180, 540, 1000]},
+            {"recognition": "OCR", "expected": "前往", "roi": [480, 180, 240, 1000]}
+        ],
+        "box_index": 0,
+        "action": "Click",
+        "target_offset": [510, 25, -100, 20],
+        "post_delay": 1200
+    },
+    "点击主页名媛会入口": {
+        "recognition": "OCR",
+        "expected": "名媛会",
+        "roi": [270, 540, 190, 300],
+        "action": "Click"
+    },
+    "点击主页名媛会入口固定位置": {
+        "recognition": "DirectHit",
+        "target": [365, 680],
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "名媛会界面已打开": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "兑换商店|名媛会管理", "roi": [100, 220, 500, 430]},
+            {"recognition": "OCR", "expected": "花房培育|庄园勤务", "roi": [350, 850, 370, 400]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "点击花房培育": {
+        "recognition": "OCR",
+        "expected": "花房培育",
+        "roi": [450, 1000, 270, 250],
+        "action": "Click",
+        "post_delay": 800
+    },
+    "花房培育界面已打开": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "花房培育", "roi": [0, 0, 330, 150]},
+            {"recognition": "OCR", "expected": "今日进度", "roi": [180, 80, 430, 250]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "执行入门培育": {
+        "recognition": "DirectHit",
+        "target": [193, 680],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "执行初级培育": {
+        "recognition": "DirectHit",
+        "target": [527, 680],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "执行中级培育": {
+        "recognition": "DirectHit",
+        "target": [193, 1147],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "执行高级培育": {
+        "recognition": "DirectHit",
+        "target": [527, 1147],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "花房培育恭喜获得弹层": {
+        "recognition": "OCR",
+        "expected": "恭喜获得",
+        "roi": [130, 250, 460, 300],
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "花房培育返回名媛会": {
+        "recognition": "DirectHit",
+        "target": [45, 1230],
+        "action": "Click",
+        "post_delay": 800
+    },
+    "点击庄园补给动态入口": {
+        "recognition": "OCR",
+        "expected": "庄园补给",
+        "roi": [0, 650, 330, 560],
+        "action": "Click"
+    },
+    "庄园补给界面已打开": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "距离结束", "roi": [0, 400, 500, 300]},
+            {"recognition": "OCR", "expected": "售.?价|点击讲价|买买买|已购买", "roi": [0, 650, 720, 250]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "点击庄园补给讲价": {
+        "recognition": "OCR",
+        "expected": "点击讲价",
+        "roi": [450, 700, 270, 170],
+        "action": "Click",
+        "post_delay": 1200
+    },
+    "庄园补给讲价后界面": {
+        "recognition": "OCR",
+        "expected": "买买买|已购买",
+        "roi": [450, 700, 270, 170],
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "庄园补给讲价价格OCR": {
+        "recognition": "OCR",
+        "expected": "[-−–—]?[0-9]+",
+        "roi": [290, 730, 170, 100],
+        "action": "DoNothing",
+        "timeout": 2000
+    },
+    "点击庄园补给买买买": {
+        "recognition": "OCR",
+        "expected": "^买买买$",
+        "roi": [450, 700, 270, 170],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "庄园补给购买确认弹窗": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "提示|是否花费", "roi": [120, 250, 520, 500]},
+            {"recognition": "OCR", "expected": "^确定$", "roi": [350, 680, 300, 220]}
+        ],
+        "box_index": 1,
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "确认购买庄园补给": {
+        "recognition": "OCR",
+        "expected": "^确定$",
+        "roi": [350, 680, 300, 220],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "庄园补给购买恭喜获得弹层": {
+        "recognition": "OCR",
+        "expected": "恭喜获得",
+        "roi": [150, 250, 420, 300],
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "庄园补给已购买界面": {
+        "recognition": "OCR",
+        "expected": "已购买",
+        "roi": [450, 700, 270, 170],
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "关闭庄园补给": {
+        "recognition": "DirectHit",
+        "target": [662, 103],
+        "action": "Click",
+        "post_delay": 800
+    },
+    "名媛会返回主页": {
+        "recognition": "DirectHit",
+        "target": [45, 1230],
+        "action": "Click",
+        "post_delay": 1000
+    },
     "日常活跃度达到100": {
         "recognition": "And",
         "all_of": [
