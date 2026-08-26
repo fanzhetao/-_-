@@ -14,10 +14,26 @@ import runner
 
 
 APP_VERSION = (runner.BUNDLE_DIR / "VERSION").read_text(encoding="utf-8").strip()
-BASE_WINDOW_WIDTH = 640
+BASE_WINDOW_WIDTH = 780
 BASE_WINDOW_HEIGHT = 620
-MIN_WINDOW_WIDTH = 560
+MIN_WINDOW_WIDTH = 700
 MIN_WINDOW_HEIGHT = 480
+
+
+def move_list_item(items: list, item, target_index: int) -> bool:
+    """按对象身份移动列表项；返回顺序是否发生变化。"""
+    current_index = next(
+        (index for index, candidate in enumerate(items) if candidate is item),
+        None,
+    )
+    if current_index is None or not items:
+        return False
+    target_index = max(0, min(int(target_index), len(items) - 1))
+    if current_index == target_index:
+        return False
+    items.pop(current_index)
+    items.insert(target_index, item)
+    return True
 
 
 def calculate_ui_scale(screen_width: int, screen_height: int, dpi: float) -> float:
@@ -67,6 +83,9 @@ class FashionMallClient:
         self.initial_account_configs = account_configs
         self.account_rows: list[dict] = []
         self.account_widgets: list[tk.Widget] = []
+        self.dragged_account_row: dict | None = None
+        self.account_drag_changed = False
+        self.account_drag_enabled = True
         self.show_password = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="就绪")
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -177,12 +196,13 @@ class FashionMallClient:
         account_header.pack(fill="x", pady=(0, self._px(2)))
         account_header.columnconfigure(1, weight=3)
         account_header.columnconfigure(2, weight=3)
-        ttk.Label(account_header, text="#", width=3).grid(row=0, column=0)
+        ttk.Label(account_header, text="顺序", width=5).grid(row=0, column=0)
         ttk.Label(account_header, text="游戏账号").grid(row=0, column=1, sticky="w", padx=self._px(3))
         ttk.Label(account_header, text="游戏密码").grid(row=0, column=2, sticky="w", padx=self._px(3))
         ttk.Label(account_header, text="区号", width=6).grid(row=0, column=3, padx=self._px(3))
-        ttk.Label(account_header, text="启用", width=5).grid(row=0, column=4, padx=self._px(3))
-        ttk.Label(account_header, text="操作", width=5).grid(row=0, column=5)
+        ttk.Label(account_header, text="培育档位", width=10).grid(row=0, column=4, padx=self._px(3))
+        ttk.Label(account_header, text="启用", width=5).grid(row=0, column=5, padx=self._px(3))
+        ttk.Label(account_header, text="操作", width=5).grid(row=0, column=6)
         for account_config in self.initial_account_configs:
             self._add_account_row(account_config)
 
@@ -220,7 +240,7 @@ class FashionMallClient:
 
         ttk.Label(
             outer,
-            text="账号、密码和区号会明文保存在 runtime/config/client_config.json。",
+            text="账号、密码、区号和培育档位会保存在 runtime/config/client_config.json。",
             foreground="#666666",
         ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
 
@@ -248,9 +268,17 @@ class FashionMallClient:
         account_var = tk.StringVar(value=str(values.get("account", "")))
         password_var = tk.StringVar(value=str(values.get("password", "")))
         server_var = tk.StringVar(value=str(values.get("server_number", 1)))
+        cultivation_level_var = tk.StringVar(
+            value=runner.normalize_cultivation_level(values.get("cultivation_level"))
+        )
         active_var = tk.BooleanVar(value=bool(values.get("active", True)))
 
-        number_label = ttk.Label(row_frame, text=str(len(self.account_rows) + 1), width=3)
+        number_label = ttk.Label(
+            row_frame,
+            text=f"↕ {len(self.account_rows) + 1}",
+            width=5,
+            cursor="fleur",
+        )
         number_label.grid(row=0, column=0, padx=(0, self._px(4)))
         account_entry = ttk.Entry(row_frame, textvariable=account_var)
         account_entry.grid(row=0, column=1, sticky="ew", padx=self._px(3))
@@ -264,15 +292,23 @@ class FashionMallClient:
             row_frame, from_=1, to=999, textvariable=server_var, width=6
         )
         server_entry.grid(row=0, column=3, padx=self._px(3))
+        cultivation_level_box = ttk.Combobox(
+            row_frame,
+            textvariable=cultivation_level_var,
+            values=runner.CULTIVATION_LEVELS,
+            state="readonly",
+            width=9,
+        )
+        cultivation_level_box.grid(row=0, column=4, padx=self._px(3))
         active_button = ttk.Checkbutton(row_frame, text="使用", variable=active_var)
-        active_button.grid(row=0, column=4, padx=self._px(3))
+        active_button.grid(row=0, column=5, padx=self._px(3))
         remove_button = ttk.Button(
             row_frame,
             text="删除",
             width=5,
             command=lambda frame=row_frame: self._remove_account_row(frame),
         )
-        remove_button.grid(row=0, column=5, padx=(self._px(3), 0))
+        remove_button.grid(row=0, column=6, padx=(self._px(3), 0))
 
         row = {
             "frame": row_frame,
@@ -280,19 +316,80 @@ class FashionMallClient:
             "account": account_var,
             "password": password_var,
             "server_number": server_var,
+            "cultivation_level": cultivation_level_var,
             "active": active_var,
             "account_entry": account_entry,
             "password_entry": password_entry,
+            "cultivation_level_box": cultivation_level_box,
         }
         self.account_rows.append(row)
+        number_label.bind(
+            "<ButtonPress-1>",
+            lambda _event, frame=row_frame: self._start_account_drag(frame),
+        )
+        number_label.bind("<B1-Motion>", self._drag_account_row)
+        number_label.bind("<ButtonRelease-1>", self._end_account_drag)
         self.account_widgets.extend(
-            (account_entry, password_entry, server_entry, active_button, remove_button)
+            (
+                account_entry,
+                password_entry,
+                server_entry,
+                cultivation_level_box,
+                active_button,
+                remove_button,
+            )
         )
         self.root.after_idle(self._scroll_accounts_to_bottom)
 
     def _scroll_accounts_to_bottom(self) -> None:
         self._refresh_accounts_scrollregion()
         self.accounts_canvas.yview_moveto(1.0)
+
+    def _start_account_drag(self, frame: ttk.Frame):
+        if not self.account_drag_enabled:
+            return "break"
+        self.dragged_account_row = next(
+            (row for row in self.account_rows if row["frame"] is frame),
+            None,
+        )
+        self.account_drag_changed = False
+        return "break"
+
+    def _drag_account_row(self, event):
+        dragged_row = self.dragged_account_row
+        if not self.account_drag_enabled or dragged_row is None:
+            return "break"
+
+        centers = [
+            row["frame"].winfo_rooty() + row["frame"].winfo_height() // 2
+            for row in self.account_rows
+        ]
+        if not centers:
+            return "break"
+        target_index = min(
+            range(len(centers)),
+            key=lambda index: abs(event.y_root - centers[index]),
+        )
+        if move_list_item(self.account_rows, dragged_row, target_index):
+            self.account_drag_changed = True
+            self._repack_account_rows()
+        return "break"
+
+    def _end_account_drag(self, _event=None):
+        if self.dragged_account_row is not None:
+            self.dragged_account_row = None
+            if self.account_drag_changed:
+                self._append_log("账号执行顺序已调整；点击开始后将按当前顺序执行。")
+        self.account_drag_changed = False
+        return "break"
+
+    def _repack_account_rows(self) -> None:
+        for row in self.account_rows:
+            row["frame"].pack_forget()
+        for index, row in enumerate(self.account_rows, start=1):
+            row["frame"].pack(fill="x", pady=self._px(3))
+            row["number_label"].configure(text=f"↕ {index}")
+        self._refresh_accounts_scrollregion()
 
     def _remove_account_row(self, frame: ttk.Frame) -> None:
         if len(self.account_rows) == 1:
@@ -305,7 +402,7 @@ class FashionMallClient:
                 self.account_widgets.remove(widget)
         frame.destroy()
         for index, row in enumerate(self.account_rows, start=1):
-            row["number_label"].configure(text=str(index))
+            row["number_label"].configure(text=f"↕ {index}")
 
     def _collect_accounts(self) -> list[dict]:
         accounts = []
@@ -324,6 +421,9 @@ class FashionMallClient:
                     "account": account,
                     "password": password,
                     "server_number": server_number,
+                    "cultivation_level": runner.validate_cultivation_level(
+                        row["cultivation_level"].get()
+                    ),
                     "active": bool(row["active"].get()),
                 }
             )
@@ -332,11 +432,22 @@ class FashionMallClient:
         return accounts
 
     def _set_account_controls_state(self, state: str) -> None:
+        self.account_drag_enabled = state == "normal"
+        if not self.account_drag_enabled:
+            self.dragged_account_row = None
+            self.account_drag_changed = False
         for widget in self.account_widgets:
             try:
                 widget.configure(state=state)
             except tk.TclError:
                 pass
+        if state == "normal":
+            for row in self.account_rows:
+                row["cultivation_level_box"].configure(state="readonly")
+        for row in self.account_rows:
+            row["number_label"].configure(
+                cursor="fleur" if self.account_drag_enabled else "arrow"
+            )
 
     def _write_session_log(self, message: str) -> None:
         timestamp = datetime.now().isoformat(timespec="milliseconds")
@@ -400,7 +511,7 @@ class FashionMallClient:
     def _clear_config(self) -> None:
         if not messagebox.askyesno(
             "清除本地配置",
-            "确定删除本地保存的账号、密码和区号吗？",
+            "确定删除本地保存的账号、密码、区号和培育档位吗？",
             parent=self.root,
         ):
             return
@@ -432,6 +543,9 @@ class FashionMallClient:
                     account_config["account"],
                     account_config["password"],
                     server_number=account_config["server_number"],
+                    cultivation_level=account_config.get(
+                        "cultivation_level", runner.DEFAULT_CULTIVATION_LEVEL
+                    ),
                     report=self._report,
                     cancel_event=cancel_event,
                     debug_screenshot_dir=self.debug_screenshot_dir / f"account-{index}",
