@@ -80,6 +80,15 @@ DO_NOT_REMIND_CHECKBOX = (278, 1122)
 DO_NOT_REMIND_CLOSE = (646, 194)
 MONTHLY_SIGN_IN_BUTTON = (360, 994)
 MONTHLY_SIGN_IN_MAX_ATTEMPTS = 2
+MONTHLY_CUMULATIVE_REWARDS = (
+    (2, (370, 208)),
+    (7, (445, 208)),
+    (14, (522, 208)),
+    (21, (598, 208)),
+    (28, (674, 208)),
+)
+MONTHLY_REWARD_CHECK_RADIUS = 26
+MONTHLY_REWARD_GREEN_COUNT = 250
 SERVER_LIST_MAX_SWIPES = 24
 DAILY_LIST_MAX_SWIPES = 20
 DAILY_TASK_SEEK_SWIPES = 20
@@ -118,6 +127,13 @@ TRANSITION_CONFIRM_TIMEOUT_SECONDS = 3.0
 TRANSITION_CONFIRM_POLL_TIMEOUT_MS = 500
 TRANSITION_CONFIRM_POLL_INTERVAL_SECONDS = 0.1
 TRANSITION_ACTION_RETRIES = 3
+LOGIN_RESULT_TIMEOUT_SECONDS = 60.0
+LOGIN_RESULT_POLL_TIMEOUT_MS = 150
+LOGIN_RESULT_POLL_INTERVAL_SECONDS = 0.05
+LOGIN_FAILURE_ENTRIES = (
+    ("登录账号不存在提示", "账号不存在"),
+    ("登录密码错误提示", "密码错误"),
+)
 LUCKY_DRAW_RESULT_TIMEOUT_SECONDS = 20.0
 ARTIST_PROMOTION_RESULT_TIMEOUT_SECONDS = 5.0
 PARTNER_CANDIDATE_ENTRIES = (
@@ -1084,6 +1100,44 @@ def run_task(
     raise RuntimeError(f"{entry}失败。请检查模拟器当前页面后重试。")
 
 
+def wait_for_login_result(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+    timeout_seconds: float = LOGIN_RESULT_TIMEOUT_SECONDS,
+) -> None:
+    """高频捕获短暂登录错误提示，成功时等待进入服务器页。"""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        for entry, message in LOGIN_FAILURE_ENTRIES:
+            if _try_recognize_once(
+                tasker,
+                entry,
+                timeout_ms=LOGIN_RESULT_POLL_TIMEOUT_MS,
+            ):
+                capture_debug_step(f"登录失败：{message}")
+                report(f"[登录失败] {message}，已停止后续操作")
+                raise RuntimeError(f"登录失败：{message}。已停止后续操作。")
+
+        if _try_recognize_once(
+            tasker,
+            "服务器页已就绪",
+            timeout_ms=LOGIN_RESULT_POLL_TIMEOUT_MS,
+        ):
+            capture_debug_step("登录成功：服务器页已就绪")
+            report("[登录] 已进入服务器页")
+            return
+
+        time.sleep(LOGIN_RESULT_POLL_INTERVAL_SECONDS)
+
+    capture_debug_step("登录结果等待超时")
+    raise RuntimeError(
+        "登录后未检测到服务器页，也未捕获到账号不存在或密码错误提示。"
+        "请检查模拟器当前页面后重试。"
+    )
+
+
 def try_recognize(
     tasker: Tasker,
     entry: str,
@@ -1365,6 +1419,144 @@ def select_server(
         raise RuntimeError(f"选择后未能确认当前为 {server_number} 区。")
 
 
+def read_monthly_cumulative_days(tasker: Tasker) -> int | None:
+    """读取签到页顶部“本月累计签到 X 天”；识别失败时保守跳过奖励。"""
+    entry = "每月累计签到天数OCR"
+    override = {
+        entry: {
+            "recognition": "OCR",
+            "expected": ".+",
+            "action": "DoNothing",
+            "next": [],
+            "pre_delay": 0,
+            "post_delay": 0,
+            "timeout": 1500,
+        }
+    }
+    job = tasker.post_task(entry, override)
+    job.wait()
+    if not job.succeeded:
+        return None
+    detail = job.get()
+    if detail is None:
+        return None
+
+    recognized: list[tuple[int, str]] = []
+    for node in detail.nodes:
+        recognition = node.recognition
+        if recognition is None:
+            continue
+        for result in recognition.all_results:
+            text = getattr(result, "text", None)
+            box = getattr(result, "box", None)
+            if not text:
+                continue
+            x = int(box[0]) if box is not None else 0
+            recognized.append((x, re.sub(r"\s+", "", str(text))))
+
+    combined = "".join(text for _x, text in sorted(recognized))
+    matches = re.findall(r"(\d{1,2})天", combined)
+    valid_days = [int(value) for value in matches if 0 <= int(value) <= 31]
+    return valid_days[0] if valid_days else None
+
+
+def monthly_reward_claimed_at_center(
+    image: np.ndarray,
+    center: tuple[int, int],
+) -> tuple[bool, int]:
+    """用奖励格中央的大面积绿色勾判断累计奖励是否已经领取。"""
+    center_x, center_y = center
+    radius = MONTHLY_REWARD_CHECK_RADIUS
+    height, width = image.shape[:2]
+    roi = image[
+        max(0, center_y - radius) : min(height, center_y + radius),
+        max(0, center_x - radius) : min(width, center_x + radius),
+    ]
+    if roi.size == 0 or roi.ndim < 3 or roi.shape[2] < 3:
+        return False, 0
+
+    channel_0 = roi[:, :, 0].astype(np.int16)
+    green = roi[:, :, 1].astype(np.int16)
+    channel_2 = roi[:, :, 2].astype(np.int16)
+    green_pixels = (
+        (green >= 130)
+        & (green >= channel_0 + 25)
+        & (green >= channel_2 + 25)
+    )
+    green_count = int(green_pixels.sum())
+    return green_count >= MONTHLY_REWARD_GREEN_COUNT, green_count
+
+
+def claim_monthly_cumulative_rewards(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+) -> int:
+    """领取所有已达成且未显示绿色领取勾的月累计签到奖励。"""
+    cumulative_days = read_monthly_cumulative_days(tasker)
+    if cumulative_days is None:
+        report("[签到累计奖励] 未识别到本月累计签到天数，保守跳过")
+        return 0
+
+    report(f"[签到累计奖励] 本月累计签到 {cumulative_days} 天")
+    claimed_count = 0
+    image = capture_screen(controller)
+    for required_days, center in MONTHLY_CUMULATIVE_REWARDS:
+        if required_days > cumulative_days:
+            continue
+        already_claimed, green_count = monthly_reward_claimed_at_center(image, center)
+        if already_claimed:
+            report(
+                f"[签到累计奖励] {required_days} 天奖励已领取，"
+                f"绿色勾像素={green_count}"
+            )
+            continue
+
+        report(f"[签到累计奖励] 尝试领取 {required_days} 天奖励")
+        wait_job(
+            controller.post_click(*center),
+            f"点击累计签到 {required_days} 天奖励",
+        )
+        time.sleep(0.35)
+        reward_confirmed = try_execute(tasker, "签到确认按钮", report)
+        if (
+            not reward_confirmed
+            and _try_recognize_once(
+                tasker,
+                "中断赠礼恭喜获得弹层",
+                timeout_ms=1000,
+            )
+            and _try_execute_once(
+                tasker,
+                "关闭中断赠礼恭喜获得固定位置",
+                timeout_ms=1000,
+            )
+        ):
+            reward_confirmed = True
+            report("[签到累计奖励] 已关闭“恭喜获得”结果层")
+
+        if reward_confirmed:
+            claimed_count += 1
+            report(f"[签到累计奖励] 已领取 {required_days} 天奖励")
+            time.sleep(0.2)
+            image = capture_screen(controller)
+            continue
+
+        image = capture_screen(controller)
+        now_claimed, _green_count = monthly_reward_claimed_at_center(image, center)
+        if now_claimed:
+            claimed_count += 1
+            report(f"[签到累计奖励] 已确认 {required_days} 天奖励出现领取勾")
+        else:
+            report(
+                f"[签到累计奖励] {required_days} 天奖励点击后未确认领取，"
+                "不重复点击"
+            )
+
+    report(f"[签到累计奖励] 检查完成，本次领取 {claimed_count} 项")
+    return claimed_count
+
+
 def handle_sign_in(
     tasker: Tasker,
     controller: AdbController,
@@ -1387,7 +1579,8 @@ def handle_sign_in(
         )
         return next_attempt
 
-    report("[弹窗] 签到已完成，关闭签到页")
+    claim_monthly_cumulative_rewards(tasker, controller, report)
+    report("[弹窗] 签到及累计奖励检查已完成，关闭签到页")
     wait_job(controller.post_click(680, 100), "关闭签到页")
     return MONTHLY_SIGN_IN_MAX_ATTEMPTS
 
@@ -3301,6 +3494,7 @@ def run_automation(
             cancel_event,
         )
         run_task(tasker, "点击登录按钮", report, cancel_event)
+        wait_for_login_result(tasker, report, cancel_event)
         select_server(tasker, controller, server_number, report, cancel_event)
         report(f"[选服] 已复核为 {server_number} 区，现在点击开始")
         run_task(tasker, "点击开始按钮", report, cancel_event)
