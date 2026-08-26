@@ -659,6 +659,39 @@
         "action": "Click",
         "post_delay": 1000
     },
+    "店铺达到最大等级提示": {
+        "recognition": "OCR",
+        "expected": "店铺达到最大等级|提升拓展等级",
+        "roi": [40, 20, 640, 150],
+        "action": "DoNothing"
+    },
+    "点击店铺拓展固定位置": {
+        "recognition": "DirectHit",
+        "target": [500, 1145],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "店铺拓展弹窗已打开": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "^拓展$", "roi": [200, 180, 320, 180]},
+            {"recognition": "OCR", "expected": "拓展等级|等级上限", "roi": [120, 620, 480, 300]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing"
+    },
+    "确认店铺拓展固定位置": {
+        "recognition": "DirectHit",
+        "target": [360, 970],
+        "action": "Click",
+        "post_delay": 500
+    },
+    "店铺拓展成功弹层": {
+        "recognition": "OCR",
+        "expected": "拓展成功",
+        "roi": [150, 150, 420, 300],
+        "action": "DoNothing"
+    },
     "点击进货": {
         "recognition": "DirectHit",
         "action": "Click",
@@ -1020,12 +1053,6 @@
         "target_offset": [510, 25, -100, 20],
         "post_delay": 1200
     },
-    "点击主页名媛会入口": {
-        "recognition": "OCR",
-        "expected": "名媛会",
-        "roi": [270, 540, 190, 300],
-        "action": "Click"
-    },
     "点击主页名媛会入口固定位置": {
         "recognition": "DirectHit",
         "target": [365, 680],
@@ -1046,6 +1073,12 @@
         "recognition": "OCR",
         "expected": "花房培育",
         "roi": [450, 1000, 270, 250],
+        "action": "Click",
+        "post_delay": 800
+    },
+    "点击花房培育固定位置": {
+        "recognition": "DirectHit",
+        "target": [590, 1145],
         "action": "Click",
         "post_delay": 800
     },

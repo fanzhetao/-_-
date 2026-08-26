@@ -43,7 +43,7 @@ ADB_SCREEN_EMULATOR_EXTRAS = 1 << 6
 ADB_INPUT_DEFAULT = (1 << 64) - 1 - (1 << 3)
 REFERENCE_SCREEN_WIDTH = 720
 REFERENCE_SCREEN_HEIGHT = 1280
-POPUP_QUIET_SECONDS = 5.0
+POPUP_QUIET_SECONDS = 2.0
 OFFLINE_REWARD_WAIT_SECONDS = 20.0
 POPUP_POLL_TIMEOUT_MS = 250
 POPUP_POLL_INTERVAL_SECONDS = 0.15
@@ -149,9 +149,7 @@ CULTIVATION_ACTION_ENTRIES = {
     "中级培育": "执行中级培育",
     "高级培育": "执行高级培育",
 }
-DEBUTANTE_ENTRY_OCR_ATTEMPTS = 12
-DEBUTANTE_ENTRY_OCR_TIMEOUT_MS = 250
-DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS = 0.15
+FLOWER_ROOM_ENTRY_FIXED_ATTEMPTS = 3
 MANOR_SUPPLY_ENTRY_OCR_ATTEMPTS = 12
 MANOR_SUPPLY_ENTRY_OCR_TIMEOUT_MS = 500
 MANOR_SUPPLY_ENTRY_POLL_INTERVAL_SECONDS = 0.15
@@ -1717,9 +1715,14 @@ def handle_delayed_popups(
         time.sleep(POPUP_POLL_INTERVAL_SECONDS)
 
     if offline_reward_handled:
-        report("[执行] 离线收益已处理，连续 5 秒无弹窗后完成")
+        report(
+            f"[执行] 离线收益已处理，连续 {POPUP_QUIET_SECONDS:g} 秒无弹窗后完成"
+        )
     else:
-        report("[执行] 本次未出现离线收益，继续确认连续 5 秒无弹窗")
+        report(
+            f"[执行] 本次未出现离线收益，"
+            f"继续确认连续 {POPUP_QUIET_SECONDS:g} 秒无弹窗"
+        )
     quiet_since = time.monotonic()
 
     while time.monotonic() - quiet_since < POPUP_QUIET_SECONDS:
@@ -2141,14 +2144,27 @@ def run_daily_forward(
         stayed_on_daily = False
         for transition_check in range(1, DAILY_TRANSITION_CHECKS + 1):
             time.sleep(0.5)
-            if try_recognize(
-                tasker,
-                destination_entry,
-                timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
-                report=report,
-                cancel_event=cancel_event,
-                recover_interrupting_popup=False,
-            ):
+            if destination_entry == "主界面已到达":
+                destination_confirmed = main_screen_is_reached(
+                    tasker,
+                    report,
+                    cancel_event,
+                    total_timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+                    context=(
+                        "日常前往确认 "
+                        f"{transition_check}/{DAILY_TRANSITION_CHECKS}"
+                    ),
+                )
+            else:
+                destination_confirmed = try_recognize(
+                    tasker,
+                    destination_entry,
+                    timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+                    report=report,
+                    cancel_event=cancel_event,
+                    recover_interrupting_popup=False,
+                )
+            if destination_confirmed:
                 report(
                     f"[日常前往] 已确认目标页面：{destination_entry}"
                     f"（点击 {attempt}/{total_attempts}，"
@@ -2898,8 +2914,10 @@ def complete_commercial_daily_group(
         ensure_checkbox_selected(
             tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
         )
-        run_task(tasker, "生鲜超市升级", report, cancel_event)
-        report("[日常计划] 已执行：任意店铺升级10次")
+        upgrade_store_with_expansion_fallback(
+            tasker, controller, report, cancel_event
+        )
+        report("[日常计划] 已执行升级动作，稍后返回日常复核完成状态")
     elif "fresh_stock" in pending:
         enter_fresh_supermarket_from_daily(
             tasker, controller, report, cancel_event
@@ -3023,6 +3041,85 @@ def complete_commercial_daily_group(
     if at_department_store:
         click_bottom_commercial_street(tasker, report, cancel_event)
         return_to_daily(tasker, report, cancel_event)
+
+    if "store_upgrade" in pending:
+        if not seek_daily_task(
+            tasker,
+            controller,
+            "任意店铺升级任务已完成",
+            report,
+            cancel_event,
+        ):
+            capture_debug_step("店铺升级后日常任务仍未完成")
+            raise RuntimeError(
+                "已执行店铺升级，但返回日常后未确认“任意店铺升级10次”完成。"
+            )
+        report("[日常计划] 已复核完成：任意店铺升级10次")
+
+
+def upgrade_store_with_expansion_fallback(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """升级店铺；达到等级上限时先拓展，再重新执行连升十级。"""
+    run_task(tasker, "生鲜超市升级", report, cancel_event)
+    reached_level_cap = try_recognize(
+        tasker,
+        "店铺达到最大等级提示",
+        timeout_ms=1500,
+        report=report,
+        cancel_event=cancel_event,
+        recover_interrupting_popup=False,
+    )
+    if not reached_level_cap:
+        report("[店铺升级] 未检测到等级上限提示，升级点击已生效")
+        return
+
+    report(
+        "[店铺升级] 检测到店铺达到最大等级；"
+        "使用固定位置 (500, 1145) 点击“拓展”"
+    )
+    run_confirmed_transition(
+        tasker,
+        "点击店铺拓展固定位置",
+        "店铺拓展弹窗已打开",
+        report,
+        cancel_event,
+    )
+    report("[店铺拓展] 使用固定位置 (360, 970) 确认拓展")
+    run_confirmed_transition(
+        tasker,
+        "确认店铺拓展固定位置",
+        "店铺拓展成功弹层",
+        report,
+        cancel_event,
+    )
+    dismiss_result_overlay(
+        tasker,
+        controller,
+        "店铺拓展成功弹层",
+        report,
+        cancel_event,
+    )
+    run_task(tasker, "生鲜超市界面已打开", report, cancel_event)
+    ensure_checkbox_selected(
+        tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
+    )
+    report("[店铺升级] 拓展完成，重新执行连升十级")
+    run_task(tasker, "生鲜超市升级", report, cancel_event)
+    if try_recognize(
+        tasker,
+        "店铺达到最大等级提示",
+        timeout_ms=1500,
+        report=report,
+        cancel_event=cancel_event,
+        recover_interrupting_popup=False,
+    ):
+        capture_debug_step("店铺拓展后升级仍提示达到最大等级")
+        raise RuntimeError("店铺拓展完成后再次升级，仍提示达到最大等级。")
+    report("[店铺升级] 拓展后已重新执行连升十级")
 
 
 def complete_artist_daily_group(
@@ -3152,38 +3249,8 @@ def enter_debutante_club_from_main(
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    """高频识别可能被引导手指遮挡的“名媛会”，失败后固定位置兜底。"""
-    report(
-        "[名媛会入口] 开始高频识别可能被引导手指遮挡的“名媛会”"
-    )
-    for attempt in range(1, DEBUTANTE_ENTRY_OCR_ATTEMPTS + 1):
-        ensure_not_cancelled(cancel_event)
-        if _try_execute_once(
-            tasker,
-            "点击主页名媛会入口",
-            timeout_ms=DEBUTANTE_ENTRY_OCR_TIMEOUT_MS,
-        ):
-            report(
-                f"[名媛会入口] 第 {attempt}/{DEBUTANTE_ENTRY_OCR_ATTEMPTS} 次"
-                "识别成功并点击"
-            )
-            time.sleep(0.5)
-            if _try_recognize_once(
-                tasker,
-                "名媛会界面已打开",
-                timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
-            ):
-                report("[名媛会入口] 已确认进入名媛会")
-                capture_debug_step("已通过高频OCR进入名媛会")
-                return
-        else:
-            report(
-                f"[名媛会入口] 第 {attempt}/{DEBUTANTE_ENTRY_OCR_ATTEMPTS} 次"
-                "暂未识别"
-            )
-        time.sleep(DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS)
-
-    report("[名媛会入口] 多次 OCR 未完成跳转，使用校准固定位置兜底")
+    """使用校准固定位置进入名媛会，避开装饰字和引导手指对 OCR 的干扰。"""
+    report("[名媛会入口] 使用校准固定位置 (365, 680) 进入名媛会")
     run_confirmed_transition(
         tasker,
         "点击主页名媛会入口固定位置",
@@ -3191,7 +3258,64 @@ def enter_debutante_club_from_main(
         report,
         cancel_event,
     )
-    report("[名媛会入口] 固定位置兜底后已确认进入名媛会")
+    report("[名媛会入口] 已确认通过固定位置进入名媛会")
+
+
+def enter_flower_room_from_debutante_club(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """OCR 优先点击花房培育；装饰字体识别失败时使用截图校准坐标。"""
+    if _try_execute_once(
+        tasker,
+        "点击花房培育",
+        timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+    ):
+        report("[花房入口] OCR 已识别并点击“花房培育”")
+        if _transition_confirmed(
+            tasker,
+            "花房培育界面已打开",
+            report,
+            cancel_event,
+        ):
+            report("[花房入口] 已确认进入花房培育")
+            return
+        report("[花房入口] OCR 点击后未确认跳转，改用校准固定位置")
+    else:
+        report(
+            "[花房入口] 装饰字体 OCR 未识别，"
+            "使用校准固定位置 (590, 1145)"
+        )
+
+    for attempt in range(1, FLOWER_ROOM_ENTRY_FIXED_ATTEMPTS + 1):
+        ensure_not_cancelled(cancel_event)
+        if not _try_execute_once(
+            tasker,
+            "点击花房培育固定位置",
+            timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+        ):
+            raise RuntimeError("执行花房培育固定位置点击失败。")
+        if _transition_confirmed(
+            tasker,
+            "花房培育界面已打开",
+            report,
+            cancel_event,
+        ):
+            report(
+                "[花房入口] 固定位置点击后已确认进入花房培育"
+                f"（{attempt}/{FLOWER_ROOM_ENTRY_FIXED_ATTEMPTS}）"
+            )
+            return
+        report(
+            "[花房入口] 固定位置点击后暂未确认目标页，准备重试"
+            f"（{attempt}/{FLOWER_ROOM_ENTRY_FIXED_ATTEMPTS}）"
+        )
+
+    capture_debug_step("花房培育固定位置点击后仍未进入")
+    raise RuntimeError(
+        "点击花房培育后仍未确认目标页面；为避免误触返回键，已停止操作。"
+    )
 
 
 def complete_lady_cultivation_daily(
@@ -3220,13 +3344,7 @@ def complete_lady_cultivation_daily(
         cancel_event,
     )
     enter_debutante_club_from_main(tasker, report, cancel_event)
-    run_confirmed_transition(
-        tasker,
-        "点击花房培育",
-        "花房培育界面已打开",
-        report,
-        cancel_event,
-    )
+    enter_flower_room_from_debutante_club(tasker, report, cancel_event)
     action_entry = CULTIVATION_ACTION_ENTRIES[cultivation_level]
     report(f"[花房培育] 选择{cultivation_level}")
     run_task(tasker, action_entry, report, cancel_event)
@@ -3331,40 +3449,47 @@ def complete_manor_supply(
     report: Reporter = print,
     cancel_event=None,
 ) -> bool:
-    """完成讲价；仅在红框价格明确为负数时购买，最后返回主页。"""
+    """处理庄园补给；已购买则直接关闭，否则仅在价格为负时购买。"""
     enter_manor_supply_from_debutante_club(tasker, report, cancel_event)
-    run_task(tasker, "点击庄园补给讲价", report, cancel_event)
-    report("[庄园补给] 已点击讲价；不识别角色弹层，点击安全位置继续")
-    wait_job(controller.post_click(80, 220), "关闭庄园补给讲价角色弹层")
-    time.sleep(0.5)
-    run_task(tasker, "庄园补给讲价后界面", report, cancel_event)
-
-    price = read_manor_supply_bargain_price(tasker)
-    purchased = False
-    if price is None:
-        report("[庄园补给] 红框价格未能可靠识别，按安全规则不购买")
-    elif price >= 0:
-        report(f"[庄园补给] 红框价格={price}，不是负数，不购买")
+    purchased = _try_recognize_once(
+        tasker,
+        "庄园补给已购买界面",
+        timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+    )
+    if purchased:
+        report("[庄园补给] 打开时已显示“已购买”，视为购买完成并直接关闭")
     else:
-        report(f"[庄园补给] 红框价格={price}，确认是负数，允许购买")
-        run_confirmed_transition(
-            tasker,
-            "点击庄园补给买买买",
-            "庄园补给购买确认弹窗",
-            report,
-            cancel_event,
-        )
-        run_task(tasker, "确认购买庄园补给", report, cancel_event)
-        dismiss_result_overlay(
-            tasker,
-            controller,
-            "庄园补给购买恭喜获得弹层",
-            report,
-            cancel_event,
-        )
-        run_task(tasker, "庄园补给已购买界面", report, cancel_event)
-        purchased = True
-        report("[庄园补给] 已确认购买完成并返回已购买界面")
+        run_task(tasker, "点击庄园补给讲价", report, cancel_event)
+        report("[庄园补给] 已点击讲价；不识别角色弹层，点击安全位置继续")
+        wait_job(controller.post_click(80, 220), "关闭庄园补给讲价角色弹层")
+        time.sleep(0.5)
+        run_task(tasker, "庄园补给讲价后界面", report, cancel_event)
+
+        price = read_manor_supply_bargain_price(tasker)
+        if price is None:
+            report("[庄园补给] 红框价格未能可靠识别，按安全规则不购买")
+        elif price >= 0:
+            report(f"[庄园补给] 红框价格={price}，不是负数，不购买")
+        else:
+            report(f"[庄园补给] 红框价格={price}，确认是负数，允许购买")
+            run_confirmed_transition(
+                tasker,
+                "点击庄园补给买买买",
+                "庄园补给购买确认弹窗",
+                report,
+                cancel_event,
+            )
+            run_task(tasker, "确认购买庄园补给", report, cancel_event)
+            dismiss_result_overlay(
+                tasker,
+                controller,
+                "庄园补给购买恭喜获得弹层",
+                report,
+                cancel_event,
+            )
+            run_task(tasker, "庄园补给已购买界面", report, cancel_event)
+            purchased = True
+            report("[庄园补给] 已确认购买完成并返回已购买界面")
 
     run_confirmed_transition(
         tasker,
