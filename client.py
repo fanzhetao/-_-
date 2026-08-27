@@ -86,6 +86,9 @@ class FashionMallClient:
         self.continue_on_process_error = tk.BooleanVar(
             value=runner.load_continue_on_process_error(local_config)
         )
+        self.package_error_diagnostics = tk.BooleanVar(
+            value=runner.load_package_error_diagnostics(local_config)
+        )
         self.status = tk.StringVar(value="就绪")
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.cancel_event: threading.Event | None = None
@@ -215,11 +218,19 @@ class FashionMallClient:
         )
         self.process_error_mode_button = ttk.Checkbutton(
             mode_frame,
-            text="进程错误时保存最近 5 步现场，关闭游戏并继续下一个账号",
+            text="进程错误时关闭游戏并继续下一个账号",
             variable=self.continue_on_process_error,
         )
         self.process_error_mode_button.grid(row=0, column=0, sticky="w")
-        self.account_widgets.append(self.process_error_mode_button)
+        self.error_diagnostic_button = ttk.Checkbutton(
+            mode_frame,
+            text="发生错误时将最近 5 步操作和截图打包为 ZIP",
+            variable=self.package_error_diagnostics,
+        )
+        self.error_diagnostic_button.grid(row=1, column=0, sticky="w")
+        self.account_widgets.extend(
+            (self.process_error_mode_button, self.error_diagnostic_button)
+        )
 
         controls = ttk.Frame(outer)
         controls.grid(
@@ -503,6 +514,7 @@ class FashionMallClient:
             runner.save_account_configs(
                 accounts,
                 continue_on_process_error=bool(self.continue_on_process_error.get()),
+                package_error_diagnostics=bool(self.package_error_diagnostics.get()),
             )
         except (OSError, RuntimeError, ValueError) as error:
             messagebox.showerror("保存失败", f"无法写入本地配置：{error}", parent=self.root)
@@ -510,6 +522,7 @@ class FashionMallClient:
 
         active_accounts = client_state.require_active_accounts(accounts)
         continue_on_process_error = bool(self.continue_on_process_error.get())
+        package_error_diagnostics = bool(self.package_error_diagnostics.get())
         self.cancel_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
@@ -521,7 +534,12 @@ class FashionMallClient:
 
         self.worker = threading.Thread(
             target=self._run_worker,
-            args=(active_accounts, self.cancel_event, continue_on_process_error),
+            args=(
+                active_accounts,
+                self.cancel_event,
+                continue_on_process_error,
+                package_error_diagnostics,
+            ),
             daemon=True,
         )
         self.worker.start()
@@ -542,8 +560,11 @@ class FashionMallClient:
             row["frame"].destroy()
         self.account_rows.clear()
         self.account_widgets = self.account_widgets[:2]
-        self.account_widgets.append(self.process_error_mode_button)
+        self.account_widgets.extend(
+            (self.process_error_mode_button, self.error_diagnostic_button)
+        )
         self.continue_on_process_error.set(False)
+        self.package_error_diagnostics.set(True)
         self._add_account_row()
         self._append_log("本地账号配置已删除。")
 
@@ -552,6 +573,7 @@ class FashionMallClient:
         accounts: list[dict],
         cancel_event: threading.Event,
         continue_on_process_error: bool = False,
+        package_error_diagnostics: bool = True,
     ) -> None:
         try:
             total = len(accounts)
@@ -579,22 +601,34 @@ class FashionMallClient:
                 except runner.AutomationCancelled:
                     raise
                 except Exception as error:
+                    archive_path = None
+                    if package_error_diagnostics:
+                        try:
+                            archive_path = archive_recent_steps(
+                                self.session_log_path,
+                                account_screenshot_dir,
+                                runner.RUNTIME_DIR / "error-diagnostics",
+                                account_name=account_config["account"],
+                                account_index=index,
+                                error_message=str(error),
+                            )
+                        except Exception as archive_error:
+                            self._report(
+                                f"[报错诊断] ZIP 生成失败：{archive_error}"
+                            )
+                        else:
+                            self._report(
+                                f"[报错诊断] 最近 5 步操作和截图已保存至：{archive_path}"
+                            )
                     if not continue_on_process_error:
+                        if archive_path is not None:
+                            raise RuntimeError(
+                                f"{error}\n报错诊断包：{archive_path}"
+                            ) from error
                         raise
-                    archive_dir = archive_recent_steps(
-                        self.session_log_path,
-                        account_screenshot_dir,
-                        runner.RUNTIME_DIR / "error-diagnostics",
-                        account_index=index,
-                        error_message=str(error),
-                    )
-                    self._report(
-                        f"[进程错误恢复] 第 {index}/{total} 个账号执行异常；"
-                        f"最近 5 步现场已保存至：{archive_dir}"
-                    )
                     if not runner.close_game_after_process_error(self._report):
                         raise RuntimeError(
-                            "进程错误现场已保存，但游戏未能确认关闭；为避免影响下一个账号，账号队列已停止。"
+                            "发生进程错误，且游戏未能确认关闭；为避免影响下一个账号，账号队列已停止。"
                         ) from error
                     recovered_error_count += 1
                     self._report(
@@ -615,10 +649,14 @@ class FashionMallClient:
             self._emit("error", str(error))
         else:
             if recovered_error_count:
+                diagnostic_summary = (
+                    "并已生成诊断包。" if package_error_diagnostics else "。"
+                )
                 self._emit(
                     "done_with_errors",
                     f"账号队列已结束，共处理 {len(accounts)} 个账号；"
-                    f"其中 {recovered_error_count} 个账号发生进程错误并已保存现场。",
+                    f"其中 {recovered_error_count} 个账号发生进程错误"
+                    f"{diagnostic_summary}",
                 )
             else:
                 self._emit("done", f"账号队列已完成，共执行 {len(accounts)} 个账号。")

@@ -340,8 +340,18 @@ def load_continue_on_process_error(config: dict | None = None) -> bool:
     return config_store.load_continue_on_process_error(config)
 
 
+def load_package_error_diagnostics(config: dict | None = None) -> bool:
+    """读取客户端的报错诊断包开关。"""
+    if config is None:
+        config = load_local_config()
+    return config_store.load_package_error_diagnostics(config)
+
+
 def save_account_configs(
-    accounts: list[dict], *, continue_on_process_error: bool = False
+    accounts: list[dict],
+    *,
+    continue_on_process_error: bool = False,
+    package_error_diagnostics: bool = True,
 ) -> None:
     """原子保存账号队列；每个账号保留独立的启用状态。"""
     config_store.write_accounts(
@@ -352,6 +362,7 @@ def save_account_configs(
         validate_server_number=validate_server_number,
         validate_level=validate_cultivation_level,
         continue_on_process_error=continue_on_process_error,
+        package_error_diagnostics=package_error_diagnostics,
     )
 
 

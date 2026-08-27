@@ -98,6 +98,12 @@ def load_continue_on_process_error(config: dict) -> bool:
     return bool(config.get("continue_on_process_error", False))
 
 
+def load_package_error_diagnostics(config: dict) -> bool:
+    """读取发生错误时是否生成最近五步 ZIP 诊断包。"""
+
+    return bool(config.get("package_error_diagnostics", True))
+
+
 def normalize_accounts_for_save(
     accounts: Iterable[dict],
     *,
@@ -140,6 +146,7 @@ def write_accounts(
     validate_server_number: Callable[[int], object],
     validate_level: Callable[[object], str],
     continue_on_process_error: bool = False,
+    package_error_diagnostics: bool = True,
 ) -> None:
     """以临时文件替换方式写入账号配置，避免留下半截 JSON。"""
 
@@ -154,6 +161,7 @@ def write_accounts(
     data = {
         "accounts": normalized_accounts,
         "continue_on_process_error": bool(continue_on_process_error),
+        "package_error_diagnostics": bool(package_error_diagnostics),
     }
     temp_path = path.with_suffix(".tmp")
     temp_path.write_text(
