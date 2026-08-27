@@ -127,7 +127,7 @@ if (Test-Path -LiteralPath $SelfCheckMarker) {
 }
 $SelfCheckProcess = Start-Process `
     -FilePath $ExecutablePath `
-    -ArgumentList @("--self-check", $SelfCheckMarker) `
+    -ArgumentList @("--self-check", "`"$SelfCheckMarker`"") `
     -PassThru `
     -WindowStyle Hidden
 if (-not $SelfCheckProcess.WaitForExit(30000)) {
