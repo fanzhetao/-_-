@@ -1,0 +1,159 @@
+"""本地配置的读取、规范化和原子写入。
+
+该模块不依赖 Tkinter、MaaFramework 或设备对象，因而可以在没有模拟器的
+环境中独立测试。校验规则通过回调注入，保持客户端现有的安全边界和错误
+消息由兼容入口统一决定。
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Callable, Iterable
+
+
+Validator = Callable[[object], object]
+
+
+def read_local_config(path: Path) -> dict:
+    """读取 JSON 配置；文件不存在、损坏或根值不是对象时返回空字典。"""
+
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def normalize_level(value: object, levels: Iterable[str], default: str) -> str:
+    """将培育档位限制在受支持集合内。"""
+
+    normalized = str(value or "").strip()
+    return normalized if normalized in levels else default
+
+
+def load_accounts(
+    config: dict,
+    *,
+    levels: Iterable[str],
+    default_level: str,
+) -> list[dict]:
+    """读取多账号格式，并兼容旧版单账号格式。
+
+    返回值始终是新的普通字典列表，调用方可以安全修改，不会反向改变
+    JSON 解析结果。
+    """
+
+    level_values = tuple(levels)
+    raw_accounts = config.get("accounts")
+    if isinstance(raw_accounts, list):
+        accounts = []
+        for item in raw_accounts:
+            if not isinstance(item, dict):
+                continue
+            try:
+                server_number = int(item.get("server_number", 1))
+            except (TypeError, ValueError):
+                server_number = 1
+            accounts.append(
+                {
+                    "account": str(item.get("account", "")).strip(),
+                    "password": str(item.get("password", "")),
+                    "server_number": server_number,
+                    "cultivation_level": normalize_level(
+                        item.get("cultivation_level"), level_values, default_level
+                    ),
+                    "active": bool(item.get("active", True)),
+                }
+            )
+        if accounts:
+            return accounts
+
+    account = str(config.get("account", "")).strip()
+    password = str(config.get("password", ""))
+    try:
+        server_number = int(config.get("server_number", 1))
+    except (TypeError, ValueError):
+        server_number = 1
+    if account or password:
+        return [
+            {
+                "account": account,
+                "password": password,
+                "server_number": server_number,
+                "cultivation_level": normalize_level(
+                    config.get("cultivation_level"), level_values, default_level
+                ),
+                "active": True,
+            }
+        ]
+    return []
+
+
+def normalize_accounts_for_save(
+    accounts: Iterable[dict],
+    *,
+    default_level: str,
+    validate_credential: Callable[[str, str], object],
+    validate_server_number: Callable[[int], object],
+    validate_level: Callable[[object], str],
+) -> list[dict]:
+    """校验并转换待保存的账号队列。"""
+
+    normalized_accounts = []
+    for item in accounts:
+        account = str(item.get("account", "")).strip()
+        password = str(item.get("password", ""))
+        server_number = int(item.get("server_number", 1))
+        validate_credential(account, "账号")
+        validate_credential(password, "密码")
+        validate_server_number(server_number)
+        cultivation_level = validate_level(
+            item.get("cultivation_level", default_level)
+        )
+        normalized_accounts.append(
+            {
+                "account": account,
+                "password": password,
+                "server_number": server_number,
+                "cultivation_level": cultivation_level,
+                "active": bool(item.get("active", True)),
+            }
+        )
+    return normalized_accounts
+
+
+def write_accounts(
+    path: Path,
+    accounts: Iterable[dict],
+    *,
+    default_level: str,
+    validate_credential: Callable[[str, str], object],
+    validate_server_number: Callable[[int], object],
+    validate_level: Callable[[object], str],
+) -> None:
+    """以临时文件替换方式写入账号配置，避免留下半截 JSON。"""
+
+    normalized_accounts = normalize_accounts_for_save(
+        accounts,
+        default_level=default_level,
+        validate_credential=validate_credential,
+        validate_server_number=validate_server_number,
+        validate_level=validate_level,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"accounts": normalized_accounts}
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=4) + "\n", encoding="utf-8"
+    )
+    temp_path.replace(path)
+
+
+def clear_config(path: Path) -> None:
+    """删除本地配置（不存在时保持幂等）。"""
+
+    if path.is_file():
+        path.unlink()

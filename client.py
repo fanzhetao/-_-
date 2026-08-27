@@ -7,39 +7,33 @@ import queue
 import shutil
 import sys
 import threading
-import tkinter as tk
-from tkinter import messagebox, ttk
-
-import runner
 
 
-APP_VERSION = (runner.BUNDLE_DIR / "VERSION").read_text(encoding="utf-8").strip()
+_SELF_CHECK_MARKER: Path | None = None
+if "--self-check" in sys.argv:
+    marker_index = sys.argv.index("--self-check") + 1
+    if marker_index < len(sys.argv):
+        _SELF_CHECK_MARKER = Path(sys.argv[marker_index])
+        _SELF_CHECK_MARKER.write_text("started\n", encoding="utf-8")
+
+from fashion_mall import client_state
+from fashion_mall.paths import resolve_paths
+from fashion_mall.ui_helpers import calculate_ui_scale, move_list_item
+
+
+_PATHS = resolve_paths(__file__, sys)
+if not getattr(sys, "frozen", False):
+    import runner
+else:
+    # 冻结进程统一延迟加载 runner；自检不加载 Maa 控制器，GUI 在 main 中加载。
+    runner = None
+
+
+APP_VERSION = _PATHS.version_path.read_text(encoding="utf-8").strip()
 BASE_WINDOW_WIDTH = 780
 BASE_WINDOW_HEIGHT = 620
 MIN_WINDOW_WIDTH = 700
 MIN_WINDOW_HEIGHT = 480
-
-
-def move_list_item(items: list, item, target_index: int) -> bool:
-    """按对象身份移动列表项；返回顺序是否发生变化。"""
-    current_index = next(
-        (index for index, candidate in enumerate(items) if candidate is item),
-        None,
-    )
-    if current_index is None or not items:
-        return False
-    target_index = max(0, min(int(target_index), len(items) - 1))
-    if current_index == target_index:
-        return False
-    items.pop(current_index)
-    items.insert(target_index, item)
-    return True
-
-
-def calculate_ui_scale(screen_width: int, screen_height: int, dpi: float) -> float:
-    dpi_scale = max(dpi, 96.0) / 96.0
-    resolution_scale = min(max(screen_width, 1) / 1920.0, max(screen_height, 1) / 1080.0)
-    return max(1.0, min(2.0, max(dpi_scale, resolution_scale)))
 
 
 def enable_windows_dpi_awareness() -> None:
@@ -427,8 +421,7 @@ class FashionMallClient:
                     "active": bool(row["active"].get()),
                 }
             )
-        if not any(item["active"] for item in accounts):
-            raise RuntimeError("请至少勾选一个要使用的账号。")
+        client_state.require_active_accounts(accounts)
         return accounts
 
     def _set_account_controls_state(self, state: str) -> None:
@@ -491,7 +484,7 @@ class FashionMallClient:
             messagebox.showerror("保存失败", f"无法写入本地配置：{error}", parent=self.root)
             return
 
-        active_accounts = [item for item in accounts if item["active"]]
+        active_accounts = client_state.require_active_accounts(accounts)
         self.cancel_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
@@ -537,7 +530,9 @@ class FashionMallClient:
             for index, account_config in enumerate(accounts, start=1):
                 runner.ensure_not_cancelled(cancel_event)
                 self._report(
-                    f"[账号队列] 开始执行第 {index}/{total} 个账号（{account_config['server_number']} 区）"
+                    client_state.progress_message(
+                        index, total, account_config["server_number"]
+                    )
                 )
                 completed = runner.run_automation(
                     account_config["account"],
@@ -551,10 +546,7 @@ class FashionMallClient:
                     debug_screenshot_dir=self.debug_screenshot_dir / f"account-{index}",
                 )
                 if not completed:
-                    self._emit(
-                        "incomplete",
-                        f"第 {index}/{total} 个账号未能完成“领取 100 活跃礼包并关闭游戏”的完整条件，账号队列已停止。",
-                    )
+                    self._emit("incomplete", client_state.incomplete_message(index, total))
                     return
                 self._report(f"[账号队列] 第 {index}/{total} 个账号已完成，游戏已关闭")
                 if index < total:
@@ -639,12 +631,32 @@ class FashionMallClient:
 
 
 def main() -> None:
+    global runner, tk, messagebox, ttk
     if "--self-check" in sys.argv:
-        runner.distribution_self_check()
-        marker_index = sys.argv.index("--self-check") + 1
-        if marker_index < len(sys.argv):
-            Path(sys.argv[marker_index]).write_text("ok\n", encoding="utf-8")
+        marker_path = _SELF_CHECK_MARKER
+        if marker_path is None:
+            marker_index = sys.argv.index("--self-check") + 1
+            if marker_index < len(sys.argv):
+                marker_path = Path(sys.argv[marker_index])
+                marker_path.write_text("started\n", encoding="utf-8")
+        if runner is not None:
+            # 保持已导入 client 的调用方/单元测试可替换 runner 自检。
+            runner.distribution_self_check()
+        else:
+            from fashion_mall.self_check import distribution_self_check
+
+            distribution_self_check(_PATHS.version_path, _PATHS.ocr_dir)
+        if marker_path is not None:
+            marker_path.write_text("ok\n", encoding="utf-8")
         return
+    if runner is None:
+        import runner as runner_module
+
+        runner = runner_module
+    # 延迟加载 UI 依赖，使便携版的无界面自检不受 Tk 安装/显示环境影响。
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
     enable_windows_dpi_awareness()
     root = tk.Tk()
     FashionMallClient(root)

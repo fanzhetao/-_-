@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from getpass import getpass
 import json
 import os
 from pathlib import Path
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -20,17 +18,26 @@ from maa.resource import Resource
 from maa.tasker import Tasker
 from maa.toolkit import AdbDevice, Toolkit
 
+from fashion_mall import config as config_store
+from fashion_mall import daily_rules, validation
+from fashion_mall import devices as device_discovery
+from fashion_mall import maa_ops
+from fashion_mall import retry
+from fashion_mall import self_check
+from fashion_mall.paths import resolve_paths
 
-SOURCE_DIR = Path(__file__).resolve().parent
-BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SOURCE_DIR))
-APPLICATION_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else SOURCE_DIR
-VERSION_PATH = BUNDLE_DIR / "VERSION"
-RESOURCE_DIR = BUNDLE_DIR / "resource"
-RUNTIME_DIR = APPLICATION_DIR / "runtime"
-OCR_DIR = RESOURCE_DIR / "model" / "ocr"
+
+_PATHS = resolve_paths(__file__, sys)
+SOURCE_DIR = _PATHS.source_dir
+BUNDLE_DIR = _PATHS.bundle_dir
+APPLICATION_DIR = _PATHS.application_dir
+VERSION_PATH = _PATHS.version_path
+RESOURCE_DIR = _PATHS.resource_dir
+RUNTIME_DIR = _PATHS.runtime_dir
+OCR_DIR = _PATHS.ocr_dir
 OCR_FILES = ("det.onnx", "rec.onnx", "keys.txt")
-RUNTIME_OPTION_PATH = RUNTIME_DIR / "config" / "maa_option.json"
-CLIENT_CONFIG_PATH = RUNTIME_DIR / "config" / "client_config.json"
+RUNTIME_OPTION_PATH = _PATHS.runtime_option_path
+CLIENT_CONFIG_PATH = _PATHS.client_config_path
 LOCAL_ADB_CANDIDATES = (
     Path(r"D:\Android\Sdk\platform-tools\adb.exe"),
     Path(r"C:\Android\Sdk\platform-tools\adb.exe"),
@@ -157,19 +164,8 @@ DISABLED_DAILY_TASK_KEYS = {"partner_upgrade"}
 Reporter = Callable[[str], None]
 
 
-@dataclass(frozen=True)
-class DailyTaskSpec:
-    key: str
-    label: str
-    forward_entry: str
-    destination_entry: str
-    group: str
-
-
-@dataclass(frozen=True)
-class DailyOcrText:
-    text: str
-    box: tuple[int, int, int, int]
+DailyTaskSpec = daily_rules.DailyTaskSpec
+DailyOcrText = daily_rules.DailyOcrText
 
 
 DAILY_TASK_SPECS = (
@@ -303,18 +299,13 @@ def prepare_secure_runtime() -> None:
 
 
 def load_local_config() -> dict:
-    if not CLIENT_CONFIG_PATH.is_file():
-        return {}
-    try:
-        data = json.loads(CLIENT_CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return config_store.read_local_config(CLIENT_CONFIG_PATH)
 
 
 def normalize_cultivation_level(value) -> str:
-    normalized = str(value or "").strip()
-    return normalized if normalized in CULTIVATION_LEVELS else DEFAULT_CULTIVATION_LEVEL
+    return config_store.normalize_level(
+        value, CULTIVATION_LEVELS, DEFAULT_CULTIVATION_LEVEL
+    )
 
 
 def validate_cultivation_level(value) -> str:
@@ -330,83 +321,23 @@ def load_account_configs(config: dict | None = None) -> list[dict]:
     """读取多账号配置，并兼容旧版单账号配置结构。"""
     if config is None:
         config = load_local_config()
-
-    raw_accounts = config.get("accounts")
-    if isinstance(raw_accounts, list):
-        accounts = []
-        for item in raw_accounts:
-            if not isinstance(item, dict):
-                continue
-            try:
-                server_number = int(item.get("server_number", 1))
-            except (TypeError, ValueError):
-                server_number = 1
-            accounts.append(
-                {
-                    "account": str(item.get("account", "")).strip(),
-                    "password": str(item.get("password", "")),
-                    "server_number": server_number,
-                    "cultivation_level": normalize_cultivation_level(
-                        item.get("cultivation_level")
-                    ),
-                    "active": bool(item.get("active", True)),
-                }
-            )
-        if accounts:
-            return accounts
-
-    account = str(config.get("account", "")).strip()
-    password = str(config.get("password", ""))
-    try:
-        server_number = int(config.get("server_number", 1))
-    except (TypeError, ValueError):
-        server_number = 1
-    if account or password:
-        return [
-            {
-                "account": account,
-                "password": password,
-                "server_number": server_number,
-                "cultivation_level": normalize_cultivation_level(
-                    config.get("cultivation_level")
-                ),
-                "active": True,
-            }
-        ]
-    return []
+    return config_store.load_accounts(
+        config,
+        levels=CULTIVATION_LEVELS,
+        default_level=DEFAULT_CULTIVATION_LEVEL,
+    )
 
 
 def save_account_configs(accounts: list[dict]) -> None:
     """原子保存账号队列；每个账号保留独立的启用状态。"""
-    normalized_accounts = []
-    for item in accounts:
-        account = str(item.get("account", "")).strip()
-        password = str(item.get("password", ""))
-        server_number = int(item.get("server_number", 1))
-        validate_credential(account, "账号")
-        validate_credential(password, "密码")
-        validate_server_number(server_number)
-        cultivation_level = validate_cultivation_level(
-            item.get("cultivation_level", DEFAULT_CULTIVATION_LEVEL)
-        )
-        normalized_accounts.append(
-            {
-                "account": account,
-                "password": password,
-                "server_number": server_number,
-                "cultivation_level": cultivation_level,
-                "active": bool(item.get("active", True)),
-            }
-        )
-
-    CLIENT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {"accounts": normalized_accounts}
-    temp_path = CLIENT_CONFIG_PATH.with_suffix(".tmp")
-    temp_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=4) + "\n",
-        encoding="utf-8",
+    config_store.write_accounts(
+        CLIENT_CONFIG_PATH,
+        accounts,
+        default_level=DEFAULT_CULTIVATION_LEVEL,
+        validate_credential=validate_credential,
+        validate_server_number=validate_server_number,
+        validate_level=validate_cultivation_level,
     )
-    temp_path.replace(CLIENT_CONFIG_PATH)
 
 
 def save_local_config(
@@ -429,8 +360,7 @@ def save_local_config(
 
 
 def clear_local_config() -> None:
-    if CLIENT_CONFIG_PATH.is_file():
-        CLIENT_CONFIG_PATH.unlink()
+    config_store.clear_config(CLIENT_CONFIG_PATH)
 
 
 def require_ocr_model() -> None:
@@ -445,15 +375,7 @@ def require_ocr_model() -> None:
 
 def distribution_self_check() -> None:
     """供便携包构建流程验证资源和 MaaFramework 原生库。"""
-    from maa.library import Library
-
-    version = VERSION_PATH.read_text(encoding="utf-8").strip()
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        raise RuntimeError("VERSION 必须使用 X.Y.Z 格式。")
-    require_ocr_model()
-    maa_version = Library.version()
-    if not maa_version:
-        raise RuntimeError("无法读取 MaaFramework 版本。")
+    self_check.distribution_self_check(VERSION_PATH, OCR_DIR)
 
 
 def validate_reference_canvas(controller: AdbController, report: Reporter = print) -> None:
@@ -474,102 +396,20 @@ def validate_reference_canvas(controller: AdbController, report: Reporter = prin
 
 
 def find_mumu_devices() -> list[AdbDevice]:
-    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    for manager_path in MUMU_MANAGER_CANDIDATES:
-        if not manager_path.is_file():
-            continue
-
-        process = subprocess.run(
-            [str(manager_path), "info", "--vmindex", "all"],
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=10,
-            check=False,
-            creationflags=creation_flags,
-        )
-        if process.returncode != 0:
-            continue
-
-        try:
-            raw_info = json.loads(process.stdout)
-        except json.JSONDecodeError:
-            continue
-
-        infos = (
-            list(raw_info.values())
-            if isinstance(raw_info, dict) and "index" not in raw_info
-            else [raw_info]
-        )
-        devices: list[AdbDevice] = []
-        for info in infos:
-            if not isinstance(info, dict) or not info.get("is_process_started"):
-                continue
-            host = info.get("adb_host_ip")
-            port = info.get("adb_port")
-            index = info.get("index")
-            if not host or not isinstance(port, int) or not str(index).isdigit():
-                continue
-
-            adb_path = manager_path.parent / "adb.exe"
-            if not adb_path.is_file():
-                continue
-            devices.append(
-                AdbDevice(
-                    name="MuMu安卓设备-MuMuPlayer v5+",
-                    adb_path=adb_path,
-                    address=f"{host}:{port}",
-                    screencap_methods=ADB_SCREEN_EMULATOR_EXTRAS,
-                    input_methods=ADB_INPUT_DEFAULT,
-                    config={
-                        "extras": {
-                            "mumu": {
-                                "enable": True,
-                                "path": str(manager_path.parent.parent),
-                                "index": int(index),
-                            }
-                        }
-                    },
-                )
-            )
-        if devices:
-            return devices
-
-    return []
+    return device_discovery.find_mumu_devices(
+        MUMU_MANAGER_CANDIDATES,
+        adb_device_factory=AdbDevice,
+        screencap_methods=ADB_SCREEN_EMULATOR_EXTRAS,
+        input_methods=ADB_INPUT_DEFAULT,
+    )
 
 
 def find_adb_devices():
-    devices = Toolkit.find_adb_devices()
-    special_devices = [device for device in devices if device.config.get("extras")]
-    if special_devices:
-        return special_devices
-
-    mumu_devices = find_mumu_devices()
-    if mumu_devices:
-        return mumu_devices
-
-    if devices:
-        return devices
-
-    candidates: list[Path] = []
-    configured = os.environ.get("ADB_PATH")
-    if configured:
-        candidates.append(Path(configured))
-
-    path_adb = shutil.which("adb")
-    if path_adb:
-        candidates.append(Path(path_adb))
-
-    candidates.extend(LOCAL_ADB_CANDIDATES)
-    for adb_path in candidates:
-        if not adb_path.is_file():
-            continue
-        devices = Toolkit.find_adb_devices(adb_path)
-        if devices:
-            return devices
-
-    return []
+    return device_discovery.find_adb_devices(
+        toolkit=Toolkit,
+        mumu_finder=find_mumu_devices,
+        local_candidates=LOCAL_ADB_CANDIDATES,
+    )
 
 
 def choose_device():
@@ -595,20 +435,11 @@ def choose_device():
 
 
 def wait_job(job, label: str):
-    job.wait()
-    if not job.succeeded:
-        capture_debug_step(f"失败：{label}")
-        raise RuntimeError(f"{label}失败。请检查模拟器当前页面后重试。")
-    capture_debug_step(f"完成：{label}")
-    return job
+    return maa_ops.wait_job(job, label, capture_debug_step)
 
 
 def _task_succeeded(job) -> bool:
-    job.wait()
-    if not job.succeeded:
-        return False
-    detail = job.get()
-    return detail is not None and detail.status.succeeded
+    return maa_ops.task_succeeded(job)
 
 
 def _try_recognize_once(
@@ -616,16 +447,12 @@ def _try_recognize_once(
     entry: str,
     timeout_ms: int,
 ) -> bool:
-    override = {
-        entry: {
-            "action": "DoNothing",
-            "next": [],
-            "pre_delay": 0,
-            "post_delay": 0,
-            "timeout": timeout_ms,
-        }
-    }
-    return _task_succeeded(tasker.post_task(entry, override))
+    return maa_ops.recognize_once(
+        tasker,
+        entry,
+        timeout_ms,
+        task_succeeded_fn=_task_succeeded,
+    )
 
 
 def _try_execute_once(
@@ -633,18 +460,13 @@ def _try_execute_once(
     entry: str,
     timeout_ms: int,
 ) -> bool:
-    override = {
-        entry: {
-            "next": [],
-            "pre_delay": 0,
-            "post_delay": 0,
-            "timeout": timeout_ms,
-        }
-    }
-    succeeded = _task_succeeded(tasker.post_task(entry, override))
-    if succeeded:
-        capture_debug_step(f"完成可选动作：{entry}")
-    return succeeded
+    return maa_ops.execute_once(
+        tasker,
+        entry,
+        timeout_ms,
+        task_succeeded_fn=_task_succeeded,
+        capture=capture_debug_step,
+    )
 
 
 def handle_interrupting_login_popup(
@@ -1196,19 +1018,18 @@ def try_recognize(
     cancel_event=None,
     recover_interrupting_popup: bool = True,
 ) -> bool:
-    for recovery in range(INTERRUPTING_POPUP_MAX_RECOVERIES + 1):
-        ensure_not_cancelled(cancel_event)
-        if _try_recognize_once(tasker, entry, timeout_ms):
-            return True
-        if (
-            not recover_interrupting_popup
-            or entry in INTERRUPTING_POPUP_ENTRIES
-            or recovery >= INTERRUPTING_POPUP_MAX_RECOVERIES
-            or not handle_interrupting_popups(tasker, report, cancel_event)
-        ):
-            return False
-        report(f"[弹窗恢复] 重新识别：{entry}")
-    return False
+    return retry.retry_with_recovery(
+        lambda: _try_recognize_once(tasker, entry, timeout_ms),
+        lambda: handle_interrupting_popups(tasker, report, cancel_event),
+        max_recoveries=INTERRUPTING_POPUP_MAX_RECOVERIES,
+        ensure_not_cancelled=lambda: ensure_not_cancelled(cancel_event),
+        should_recover=lambda recovery: (
+            recover_interrupting_popup
+            and entry not in INTERRUPTING_POPUP_ENTRIES
+            and recovery < INTERRUPTING_POPUP_MAX_RECOVERIES
+        ),
+        on_retry=lambda: report(f"[弹窗恢复] 重新识别：{entry}"),
+    )
 
 
 def try_execute(
@@ -1224,17 +1045,14 @@ def try_execute(
         detection_timeout_ms=POPUP_POLL_TIMEOUT_MS,
     ):
         report(f"[弹窗恢复] 已在可选动作前清除中断弹窗：{entry}")
-    for recovery in range(INTERRUPTING_POPUP_MAX_RECOVERIES + 1):
-        ensure_not_cancelled(cancel_event)
-        if _try_execute_once(tasker, entry, POPUP_POLL_TIMEOUT_MS):
-            return True
-        if (
-            recovery >= INTERRUPTING_POPUP_MAX_RECOVERIES
-            or not handle_interrupting_popups(tasker, report, cancel_event)
-        ):
-            return False
-        report(f"[弹窗恢复] 重新执行可选动作：{entry}")
-    return False
+    return retry.retry_with_recovery(
+        lambda: _try_execute_once(tasker, entry, POPUP_POLL_TIMEOUT_MS),
+        lambda: handle_interrupting_popups(tasker, report, cancel_event),
+        max_recoveries=INTERRUPTING_POPUP_MAX_RECOVERIES,
+        ensure_not_cancelled=lambda: ensure_not_cancelled(cancel_event),
+        should_recover=lambda recovery: recovery < INTERRUPTING_POPUP_MAX_RECOVERIES,
+        on_retry=lambda: report(f"[弹窗恢复] 重新执行可选动作：{entry}"),
+    )
 
 
 def _transition_confirmed(
@@ -1370,7 +1188,7 @@ def run_confirmed_transition(
 
 
 def server_pattern(server_number: int) -> str:
-    return rf"^{server_number}(?:区|服)(?:-+.*)?$"
+    return validation.server_pattern(server_number)
 
 
 def try_select_visible_server(tasker: Tasker, server_number: int) -> bool:
@@ -1839,16 +1657,14 @@ def rewind_daily_list(
 
 
 def _normalize_daily_ocr_text(value: str) -> str:
-    return re.sub(r"\s+", "", value)
+    return daily_rules.normalize_ocr_text(value)
 
 
 def _daily_task_label_matches(ocr_text: str, task_label: str) -> bool:
-    """兼容任务标题因 UI 换行而被 OCR 拆成多个文本框。"""
-    normalized_text = _normalize_daily_ocr_text(ocr_text)
-    candidates = (task_label, *DAILY_TASK_LABEL_ALIASES.get(task_label, ()))
-    return any(
-        _normalize_daily_ocr_text(candidate) in normalized_text
-        for candidate in candidates
+    return daily_rules.task_label_matches(
+        ocr_text,
+        task_label,
+        DAILY_TASK_LABEL_ALIASES,
     )
 
 
@@ -1899,82 +1715,32 @@ def classify_daily_viewport(
     ocr_texts: list[DailyOcrText],
     specs: tuple[DailyTaskSpec, ...] = DAILY_TASK_SPECS,
 ) -> dict[str, str]:
-    """按纵向中心点把任务标题与同行按钮状态关联。"""
-    state_boxes: list[tuple[str, int]] = []
-    for item in ocr_texts:
-        x, y, width, height = item.box
-        if x + width / 2 < 480:
-            continue
-        if "已领取" in item.text:
-            state = DAILY_STATE_CLAIMED
-        elif "领取" in item.text:
-            state = DAILY_STATE_CLAIMABLE
-        elif "前往" in item.text:
-            state = DAILY_STATE_TODO
-        else:
-            continue
-        state_boxes.append((state, y + height // 2))
-
-    found: dict[str, str] = {}
-    for spec in specs:
-        title_boxes = [
-            item
-            for item in ocr_texts
-            if _daily_task_label_matches(item.text, spec.label)
-        ]
-        best_match: tuple[int, str] | None = None
-        for title in title_boxes:
-            _, y, _, height = title.box
-            title_center_y = y + height // 2
-            for state, state_center_y in state_boxes:
-                distance = abs(title_center_y - state_center_y)
-                if distance > DAILY_TASK_ROW_Y_TOLERANCE:
-                    continue
-                if best_match is None or distance < best_match[0]:
-                    best_match = (distance, state)
-        if best_match is not None:
-            found[spec.key] = best_match[1]
-    return found
+    return daily_rules.classify_viewport(
+        ocr_texts,
+        specs,
+        label_matches=_daily_task_label_matches,
+        todo_state=DAILY_STATE_TODO,
+        claimable_state=DAILY_STATE_CLAIMABLE,
+        claimed_state=DAILY_STATE_CLAIMED,
+        row_tolerance=DAILY_TASK_ROW_Y_TOLERANCE,
+    )
 
 
 def daily_forward_button_center(
     ocr_texts: list[DailyOcrText],
     task_label: str,
 ) -> tuple[int, int] | None:
-    """返回与目标任务标题纵向最接近的同行“前往”文本框中心。"""
-    titles = [
-        item for item in ocr_texts if _daily_task_label_matches(item.text, task_label)
-    ]
-    forwards = [
-        item
-        for item in ocr_texts
-        if "前往" in item.text and item.box[0] + item.box[2] / 2 >= 480
-    ]
-    best_match: tuple[float, DailyOcrText] | None = None
-    for title in titles:
-        _, title_y, _, title_height = title.box
-        title_center_y = title_y + title_height / 2
-        for forward in forwards:
-            _, forward_y, _, forward_height = forward.box
-            forward_center_y = forward_y + forward_height / 2
-            distance = abs(title_center_y - forward_center_y)
-            if distance > DAILY_TASK_ROW_Y_TOLERANCE:
-                continue
-            if best_match is None or distance < best_match[0]:
-                best_match = (distance, forward)
-
-    if best_match is None:
-        return None
-    x, y, width, height = best_match[1].box
-    return x + width // 2, y + height // 2
+    return daily_rules.forward_button_center(
+        ocr_texts,
+        task_label,
+        label_matches=_daily_task_label_matches,
+        row_tolerance=DAILY_TASK_ROW_Y_TOLERANCE,
+    )
 
 
 def daily_task_label_for_entry(entry: str) -> str | None:
     """根据日常“前往”节点名取得对应任务标题。"""
-    for spec in DAILY_TASK_SPECS:
-        if spec.forward_entry == entry:
-            return spec.label
-    return None
+    return daily_rules.task_label_for_entry(entry, DAILY_TASK_SPECS)
 
 
 def inventory_daily_tasks(
@@ -3792,15 +3558,11 @@ def complete_factory_research_actions(
 
 
 def validate_credential(value: str, label: str) -> None:
-    if not value:
-        raise RuntimeError(f"{label}不能为空。")
-    if any(ord(char) < 32 or ord(char) > 126 for char in value):
-        raise RuntimeError(f"{label}包含非 ASCII 字符，当前安全输入方式暂不支持。")
+    validation.validate_credential(value, label)
 
 
 def validate_server_number(value: int) -> None:
-    if value < 1 or value > 999:
-        raise RuntimeError("区号必须是 1 到 999 之间的整数。")
+    validation.validate_server_number(value)
 
 
 def run_adb_shell_from_stdin(device, command: str, label: str) -> None:
