@@ -1,7 +1,33 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
+Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)] [string]$FilePath,
+        [Parameter(Mandatory = $true)] [string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)] [string]$FailureMessage
+    )
+
+    & $FilePath @ArgumentList
+    if ($LASTEXITCODE -ne 0) {
+        throw "$FailureMessage（退出码：$LASTEXITCODE）"
+    }
+}
+
+if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    throw "此脚本仅支持在 64 位 Windows 上构建。"
+}
+if (-not [System.Environment]::Is64BitOperatingSystem) {
+    throw "不支持 32 位 Windows；请使用 64 位 Windows 构建。"
+}
+if ($PSVersionTable.PSVersion.Major -lt 5) {
+    throw "请使用 Windows PowerShell 5.1 或 PowerShell 7。"
+}
+
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VersionPath = Join-Path $ProjectRoot "VERSION"
 if (-not (Test-Path -LiteralPath $VersionPath)) {
@@ -13,7 +39,6 @@ if ($AppVersion -notmatch '^\d+\.\d+\.\d+$') {
 }
 $PythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $SpecPath = Join-Path $ProjectRoot "FashionMallClient.spec"
-$BuildDependencies = Join-Path $ProjectRoot ".build-deps"
 $DistDirectory = Join-Path $ProjectRoot "dist"
 $AppDirectory = Join-Path $DistDirectory "FashionMallAutomation"
 $ExecutablePath = Join-Path $AppDirectory "FashionMallClient.exe"
@@ -30,8 +55,27 @@ $VersionedDocumentation = @(
 if (-not (Test-Path -LiteralPath $PythonPath)) {
     throw "未找到 .venv。请先在项目根目录创建 Python 3.13 虚拟环境。"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tests") -PathType Container)) {
+    throw "缺少本机 tests 目录；发布构建不允许跳过单元测试。"
+}
 
-Write-Host "[1/7] 检查版本与文档..."
+Write-Host "[1/8] 检查 Windows x64 构建环境..."
+$PythonProbe = & $PythonPath -c "import platform, struct, sys; print('|'.join((sys.platform, platform.machine().lower(), str(struct.calcsize('P') * 8), '.'.join(map(str, sys.version_info[:3])))))"
+if ($LASTEXITCODE -ne 0) {
+    throw "无法读取 Python 构建环境（退出码：$LASTEXITCODE）。"
+}
+$PythonParts = ([string]$PythonProbe).Trim().Split('|')
+if ($PythonParts.Count -ne 4 -or $PythonParts[0] -ne "win32" -or $PythonParts[2] -ne "64") {
+    throw "必须使用 64 位 Windows Python 构建；当前环境：$PythonProbe"
+}
+if ($PythonParts[1] -notin @("amd64", "x86_64")) {
+    throw "必须使用 x64 Python 构建 Windows-x64 发布包；当前架构：$($PythonParts[1])"
+}
+if (-not $PythonParts[3].StartsWith("3.13.")) {
+    throw "项目要求 Python 3.13；当前版本：$($PythonParts[3])"
+}
+
+Write-Host "[2/8] 检查版本与文档..."
 foreach ($DocumentPath in $VersionedDocumentation) {
     if (-not (Test-Path -LiteralPath $DocumentPath)) {
         throw "缺少发布文档：$DocumentPath"
@@ -42,36 +86,28 @@ foreach ($DocumentPath in $VersionedDocumentation) {
     }
 }
 
-Write-Host "[2/7] 运行 Python 编译检查和单元测试..."
-& $PythonPath -m py_compile `
-    (Join-Path $ProjectRoot "client.py") `
+Write-Host "[3/8] 运行 Python 编译检查和全部单元测试..."
+Invoke-NativeCommand $PythonPath @(
+    "-m", "py_compile",
+    (Join-Path $ProjectRoot "client.py"),
     (Join-Path $ProjectRoot "runner.py")
-if ($LASTEXITCODE -ne 0) { throw "Python 编译检查失败。" }
-& $PythonPath -m unittest discover -s (Join-Path $ProjectRoot "tests") -p "test_*.py"
-if ($LASTEXITCODE -ne 0) { throw "单元测试失败。" }
+) "Python 编译检查失败。"
+Invoke-NativeCommand $PythonPath @(
+    "-m", "unittest", "discover",
+    "-s", (Join-Path $ProjectRoot "tests"),
+    "-p", "test_*.py"
+) "单元测试失败。"
 
-Write-Host "[3/7] 准备构建环境与依赖..."
-$PythonBase = (& $PythonPath -c "import sys; print(sys.base_prefix)").Trim()
-if ($LASTEXITCODE -ne 0) { throw "无法确定 Python 安装目录。" }
-$SourceTclRoot = Join-Path $PythonBase "tcl"
-$StagedTclRoot = Join-Path $BuildDependencies "tcl"
-$StagedTclLibrary = Join-Path $StagedTclRoot "tcl8.6"
-$StagedTkLibrary = Join-Path $StagedTclRoot "tk8.6"
+Write-Host "[4/8] 安装并核验 Windows 打包依赖..."
+Invoke-NativeCommand $PythonPath @(
+    "-m", "pip", "install", "--disable-pip-version-check",
+    "-r", (Join-Path $ProjectRoot "requirements-build.txt")
+) "安装打包依赖失败。"
+Invoke-NativeCommand $PythonPath @(
+    "-c", "import maa, PyInstaller, tkinter; print('MaaFramework、PyInstaller 和 Tkinter 已就绪')"
+) "Windows 打包依赖自检失败。"
 
-if (-not (Test-Path -LiteralPath (Join-Path $SourceTclRoot "tcl8.6\init.tcl"))) {
-    throw "Python 缺少 Tcl 运行库，无法打包 Tkinter 客户端。"
-}
-
-New-Item -ItemType Directory -Force -Path $StagedTclLibrary, $StagedTkLibrary | Out-Null
-Copy-Item -Path (Join-Path $SourceTclRoot "tcl8.6\*") -Destination $StagedTclLibrary -Recurse -Force
-Copy-Item -Path (Join-Path $SourceTclRoot "tk8.6\*") -Destination $StagedTkLibrary -Recurse -Force
-$env:TCL_LIBRARY = $StagedTclLibrary
-$env:TK_LIBRARY = $StagedTkLibrary
-
-& $PythonPath -m pip install --disable-pip-version-check -r (Join-Path $ProjectRoot "requirements-build.txt")
-if ($LASTEXITCODE -ne 0) { throw "安装打包依赖失败。" }
-
-Write-Host "[4/7] 使用 PyInstaller 构建便携版..."
+Write-Host "[5/8] 使用 PyInstaller 构建 Windows x64 便携版..."
 Push-Location $ProjectRoot
 try {
     & $PythonPath -m PyInstaller --noconfirm --clean $SpecPath
@@ -84,17 +120,17 @@ if (-not (Test-Path -LiteralPath $ExecutablePath)) {
     throw "打包完成后未找到客户端程序：$ExecutablePath"
 }
 
-Write-Host "[5/7] 运行便携版自检..."
+Write-Host "[6/8] 运行 Windows 便携版自检..."
 $SelfCheckMarker = Join-Path $AppDirectory ".self-check-ok"
 if (Test-Path -LiteralPath $SelfCheckMarker) {
     Remove-Item -LiteralPath $SelfCheckMarker -Force
 }
 $SelfCheckProcess = Start-Process `
     -FilePath $ExecutablePath `
-    -ArgumentList "--self-check `"$SelfCheckMarker`"" `
+    -ArgumentList @("--self-check", "`"$SelfCheckMarker`"") `
     -PassThru `
     -WindowStyle Hidden
-if (-not $SelfCheckProcess.WaitForExit(20000)) {
+if (-not $SelfCheckProcess.WaitForExit(30000)) {
     $SelfCheckProcess.Kill()
     $SelfCheckProcess.WaitForExit()
     throw "便携版自检超时。"
@@ -110,7 +146,7 @@ Copy-Item -LiteralPath (Join-Path $ProjectRoot "使用说明.md") -Destination $
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "CHANGELOG.md") -Destination $AppDirectory -Force
 Copy-Item -LiteralPath $VersionPath -Destination $AppDirectory -Force
 
-Write-Host "[6/7] 生成发布压缩包和 SHA-256..."
+Write-Host "[7/8] 生成 Windows ZIP 和 SHA-256..."
 New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
 if (Test-Path -LiteralPath $ArchivePath) {
     Remove-Item -LiteralPath $ArchivePath -Force
@@ -119,11 +155,11 @@ Compress-Archive -LiteralPath $AppDirectory -DestinationPath $ArchivePath -Compr
 $ArchiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash.ToLowerInvariant()
 Set-Content -Encoding ASCII -LiteralPath $ChecksumPath -Value "$ArchiveHash  $ArchiveName"
 
-Write-Host "[7/7] 审计发布包内容..."
+Write-Host "[8/8] 审计发布包并复核 SHA-256..."
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
 try {
-    $EntryNames = @($Archive.Entries | ForEach-Object { $_.FullName })
+    $EntryNames = @($Archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
     $RequiredEntries = @(
         "FashionMallAutomation/FashionMallClient.exe",
         "FashionMallAutomation/VERSION",
@@ -176,4 +212,4 @@ Write-Host "版本：$AppVersion"
 Write-Host "便携版目录：$AppDirectory"
 Write-Host "分发压缩包：$ArchivePath"
 Write-Host "SHA-256：$ChecksumPath"
-Write-Host "一键发布流程已全部通过。"
+Write-Host "Windows x64 一键发布流程已全部通过。" -ForegroundColor Green
