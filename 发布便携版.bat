@@ -1,13 +1,13 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_portable.ps1"
-set "RELEASE_EXIT_CODE=%ERRORLEVEL%"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build_portable.ps1"
+set "RELEASE_EXIT_CODE=%errorlevel%"
 echo.
 if not "%RELEASE_EXIT_CODE%"=="0" (
-    echo 发布失败，请检查上方错误信息。
+    echo Release failed. See the error details above.
 ) else (
-    echo 发布成功，文件已生成到 release 目录。
+    echo Release succeeded. Artifacts are in the release directory.
 )
 pause
 exit /b %RELEASE_EXIT_CODE%

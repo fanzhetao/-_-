@@ -58,6 +58,8 @@
 
 客户端桌面界面支持 1920×1080、2560×1440 和 3840×2160，并会结合 Windows DPI 自动调整窗口、字体和间距。
 
+请将压缩包完整解压到仅自己可访问的可写目录，不要直接在压缩包内运行。当前程序未进行商业代码签名；如果 Windows SmartScreen 提示未知发布者，请先核对压缩包来源及 SHA-256。MuMu 模拟器 12 和游戏仍需用户自行安装。
+
 ### 从源码运行
 
 在项目根目录创建虚拟环境并安装依赖：
@@ -72,13 +74,25 @@ py -3.13 -m venv .venv
 
 ### 构建 Windows 便携版
 
-双击 `发布便携版.bat`，或在 PowerShell 中执行：
+项目根目录只保留一个可双击发布入口：`发布便携版.bat`。该批处理文件使用 Windows 兼容的 ASCII/CRLF 格式，并调用内部的 `tools/build_portable.ps1` 执行完整发布流程。需要在终端中运行时执行：
 
 ```powershell
-.\build_portable.ps1
+.\tools\build_portable.ps1
 ```
 
-脚本会自动完成版本与文档一致性检查、Python 编译检查、全部单元测试、依赖准备、PyInstaller 构建、便携版自检、压缩、敏感文件审计和 SHA-256 复核。任一步失败都会停止，不会把失败结果当作可发布版本。成功后会在 `release/` 输出带版本号的 ZIP 和校验文件。
+脚本按以下规则执行：
+
+- 自动完成版本与文档一致性检查、Python 编译检查、全部单元测试、依赖准备、PyInstaller 构建、便携版自检、压缩、敏感文件审计和 SHA-256 复核。
+- 任一步失败都会停止，不会把失败结果当作可发布版本，并保留 `build/`、`dist/` 和 Python 缓存用于排查。
+- 全部门禁通过后，自动删除 `build/`、`dist/` 以及根目录、`fashion_mall/`、`tests/` 下本次产生的 `__pycache__/`。
+- 每个清理目标都会解析为绝对路径并校验其位于项目根目录内，拒绝删除项目目录之外的路径。
+- `.venv/`、`runtime/` 和历史发布包不会被自动清理；最终发布结果保存在 `release/`，包括带版本号的 ZIP 和 SHA-256 校验文件。
+
+需要排查打包结果时，可在终端中保留中间文件：
+
+```powershell
+.\tools\build_portable.ps1 -KeepBuildArtifacts
+```
 
 ### 运行测试
 
@@ -170,10 +184,9 @@ FashionMallAutomation/
 ├─ requirements.txt                  # MaaFramework Python 依赖范围
 ├─ requirements-build.txt            # PyInstaller 打包依赖
 ├─ FashionMallClient.spec            # Windows 便携版收集规则
-├─ build_portable.ps1                # 一键测试、构建、自检与发布审计
-├─ 发布便携版.bat                    # 可双击的一键发布入口
+├─ tools/build_portable.ps1          # 测试、构建、自检与发布审计实现
+├─ 发布便携版.bat                    # 根目录唯一的可双击发布入口
 ├─ 启动客户端.bat                    # Windows 桌面客户端入口
-├─ 使用说明.md                       # 详细行为、坐标和安全说明
 ├─ tests/                            # 仅本机保留的单元测试（不上传、不发布）
 ├─ resource/
 │  ├─ default_pipeline.json          # MaaFramework 默认节点参数
@@ -201,5 +214,3 @@ FashionMallAutomation/
 ### 正常关闭后找不到调试截图
 
 这是预期行为。正常关闭客户端会主动删除调试截图；需要排查时，请在关闭客户端前查看或复制截图。异常退出产生的截图会保留。
-
-更详细的行为说明和当前限制见 [`使用说明.md`](./使用说明.md)。

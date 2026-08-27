@@ -1,5 +1,7 @@
 ﻿[CmdletBinding()]
-param()
+param(
+    [switch] $KeepBuildArtifacts
+)
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
@@ -28,7 +30,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     throw "请使用 Windows PowerShell 5.1 或 PowerShell 7。"
 }
 
-$ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $VersionPath = Join-Path $ProjectRoot "VERSION"
 if (-not (Test-Path -LiteralPath $VersionPath)) {
     throw "未找到 VERSION 文件。"
@@ -39,6 +41,7 @@ if ($AppVersion -notmatch '^\d+\.\d+\.\d+$') {
 }
 $PythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $SpecPath = Join-Path $ProjectRoot "FashionMallClient.spec"
+$BuildDirectory = Join-Path $ProjectRoot "build"
 $DistDirectory = Join-Path $ProjectRoot "dist"
 $AppDirectory = Join-Path $DistDirectory "FashionMallAutomation"
 $ExecutablePath = Join-Path $AppDirectory "FashionMallClient.exe"
@@ -48,7 +51,6 @@ $ArchivePath = Join-Path $ReleaseDirectory $ArchiveName
 $ChecksumPath = Join-Path $ReleaseDirectory "FashionMallAutomation-v$AppVersion-Windows-x64.sha256"
 $VersionedDocumentation = @(
     (Join-Path $ProjectRoot "README.md"),
-    (Join-Path $ProjectRoot "使用说明.md"),
     (Join-Path $ProjectRoot "CHANGELOG.md")
 )
 
@@ -59,7 +61,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tests") -PathType Cont
     throw "缺少本机 tests 目录；发布构建不允许跳过单元测试。"
 }
 
-Write-Host "[1/8] 检查 Windows x64 构建环境..."
+Write-Host "[1/9] 检查 Windows x64 构建环境..."
 $PythonProbe = & $PythonPath -c "import platform, struct, sys; print('|'.join((sys.platform, platform.machine().lower(), str(struct.calcsize('P') * 8), '.'.join(map(str, sys.version_info[:3])))))"
 if ($LASTEXITCODE -ne 0) {
     throw "无法读取 Python 构建环境（退出码：$LASTEXITCODE）。"
@@ -75,7 +77,7 @@ if (-not $PythonParts[3].StartsWith("3.13.")) {
     throw "项目要求 Python 3.13；当前版本：$($PythonParts[3])"
 }
 
-Write-Host "[2/8] 检查版本与文档..."
+Write-Host "[2/9] 检查版本与文档..."
 foreach ($DocumentPath in $VersionedDocumentation) {
     if (-not (Test-Path -LiteralPath $DocumentPath)) {
         throw "缺少发布文档：$DocumentPath"
@@ -86,7 +88,7 @@ foreach ($DocumentPath in $VersionedDocumentation) {
     }
 }
 
-Write-Host "[3/8] 运行 Python 编译检查和全部单元测试..."
+Write-Host "[3/9] 运行 Python 编译检查和全部单元测试..."
 Invoke-NativeCommand $PythonPath @(
     "-m", "py_compile",
     (Join-Path $ProjectRoot "client.py"),
@@ -98,7 +100,7 @@ Invoke-NativeCommand $PythonPath @(
     "-p", "test_*.py"
 ) "单元测试失败。"
 
-Write-Host "[4/8] 安装并核验 Windows 打包依赖..."
+Write-Host "[4/9] 安装并核验 Windows 打包依赖..."
 Invoke-NativeCommand $PythonPath @(
     "-m", "pip", "install", "--disable-pip-version-check",
     "-r", (Join-Path $ProjectRoot "requirements-build.txt")
@@ -107,7 +109,7 @@ Invoke-NativeCommand $PythonPath @(
     "-c", "import maa, PyInstaller, tkinter; print('MaaFramework、PyInstaller 和 Tkinter 已就绪')"
 ) "Windows 打包依赖自检失败。"
 
-Write-Host "[5/8] 使用 PyInstaller 构建 Windows x64 便携版..."
+Write-Host "[5/9] 使用 PyInstaller 构建 Windows x64 便携版..."
 Push-Location $ProjectRoot
 try {
     & $PythonPath -m PyInstaller --noconfirm --clean $SpecPath
@@ -120,7 +122,7 @@ if (-not (Test-Path -LiteralPath $ExecutablePath)) {
     throw "打包完成后未找到客户端程序：$ExecutablePath"
 }
 
-Write-Host "[6/8] 运行 Windows 便携版自检..."
+Write-Host "[6/9] 运行 Windows 便携版自检..."
 $SelfCheckMarker = Join-Path $AppDirectory ".self-check-ok"
 if (Test-Path -LiteralPath $SelfCheckMarker) {
     Remove-Item -LiteralPath $SelfCheckMarker -Force
@@ -140,13 +142,11 @@ if ($SelfCheckProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $SelfCheck
 }
 Remove-Item -LiteralPath $SelfCheckMarker -Force
 
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "便携版使用说明.txt") -Destination $AppDirectory -Force
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "README.md") -Destination $AppDirectory -Force
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "使用说明.md") -Destination $AppDirectory -Force
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "CHANGELOG.md") -Destination $AppDirectory -Force
 Copy-Item -LiteralPath $VersionPath -Destination $AppDirectory -Force
 
-Write-Host "[7/8] 生成 Windows ZIP 和 SHA-256..."
+Write-Host "[7/9] 生成 Windows ZIP 和 SHA-256..."
 New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
 if (Test-Path -LiteralPath $ArchivePath) {
     Remove-Item -LiteralPath $ArchivePath -Force
@@ -155,7 +155,7 @@ Compress-Archive -LiteralPath $AppDirectory -DestinationPath $ArchivePath -Compr
 $ArchiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash.ToLowerInvariant()
 Set-Content -Encoding ASCII -LiteralPath $ChecksumPath -Value "$ArchiveHash  $ArchiveName"
 
-Write-Host "[8/8] 审计发布包并复核 SHA-256..."
+Write-Host "[8/9] 审计发布包并复核 SHA-256..."
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
 try {
@@ -164,8 +164,6 @@ try {
         "FashionMallAutomation/FashionMallClient.exe",
         "FashionMallAutomation/VERSION",
         "FashionMallAutomation/README.md",
-        "FashionMallAutomation/使用说明.md",
-        "FashionMallAutomation/便携版使用说明.txt",
         "FashionMallAutomation/CHANGELOG.md"
     )
     foreach ($RequiredEntry in $RequiredEntries) {
@@ -208,8 +206,30 @@ if ($RecordedHash -ne $VerifiedHash) {
     throw "SHA-256 校验文件与发布包不一致。"
 }
 
+Write-Host "[9/9] 清理构建中间文件..."
+if ($KeepBuildArtifacts) {
+    Write-Host "已按 -KeepBuildArtifacts 参数保留 build、dist 和 Python 缓存。"
+} else {
+    $ProjectRootPrefix = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\') + '\'
+    $CleanupDirectories = @(
+        $BuildDirectory,
+        $DistDirectory,
+        (Join-Path $ProjectRoot "__pycache__"),
+        (Join-Path $ProjectRoot "fashion_mall\__pycache__"),
+        (Join-Path $ProjectRoot "tests\__pycache__")
+    )
+    foreach ($CleanupDirectory in $CleanupDirectories) {
+        $ResolvedCleanupDirectory = [System.IO.Path]::GetFullPath($CleanupDirectory)
+        if (-not $ResolvedCleanupDirectory.StartsWith($ProjectRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "拒绝清理项目目录之外的路径：$ResolvedCleanupDirectory"
+        }
+        if (Test-Path -LiteralPath $ResolvedCleanupDirectory -PathType Container) {
+            Remove-Item -LiteralPath $ResolvedCleanupDirectory -Recurse -Force
+        }
+    }
+}
+
 Write-Host "版本：$AppVersion"
-Write-Host "便携版目录：$AppDirectory"
 Write-Host "分发压缩包：$ArchivePath"
 Write-Host "SHA-256：$ChecksumPath"
 Write-Host "Windows x64 一键发布流程已全部通过。" -ForegroundColor Green
