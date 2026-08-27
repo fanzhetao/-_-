@@ -1,6 +1,6 @@
 # 时尚百货城自动化
 
-当前发布版本：**1.1.0**（2026-08-26）。版本变化见 [`CHANGELOG.md`](./CHANGELOG.md)。
+当前发布版本：**1.1.1**（2026-08-27）。版本变化见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 基于 [MaaFramework](https://github.com/MaaXYZ/MaaFramework) 的 Windows 桌面自动化项目，通过 MuMu 模拟器的 ADB 接口完成《时尚百货城》的登录、弹窗处理和部分日常任务。
 
@@ -54,7 +54,7 @@
 
 ### 便携版（推荐）
 
-解压 `FashionMallAutomation-v1.1.0-Windows-x64.zip`，启动 MuMu 模拟器后双击 `FashionMallClient.exe`。便携版已经包含 Python、MaaFramework、OCR 模型及所需原生库，不需要安装 Python 包。可使用同目录的 `FashionMallAutomation-v1.1.0-Windows-x64.sha256` 校验下载文件。
+解压 `FashionMallAutomation-v1.1.1-Windows-x64.zip`，启动 MuMu 模拟器后双击 `FashionMallClient.exe`。便携版已经包含 Python、MaaFramework、OCR 模型及所需原生库，不需要安装 Python 包。可使用同目录的 `FashionMallAutomation-v1.1.1-Windows-x64.sha256` 校验下载文件。
 
 客户端桌面界面支持 1920×1080、2560×1440 和 3840×2160，并会结合 Windows DPI 自动调整窗口、字体和间距。
 
@@ -156,6 +156,17 @@ FashionMallAutomation/
 ├─ CHANGELOG.md                      # 版本更新记录
 ├─ client.py                         # Tkinter 桌面客户端与会话日志
 ├─ runner.py                         # 自动化流程、重试、页面确认和截图
+├─ fashion_mall/                     # 可复用的分层实现
+│  ├─ config.py                       # 配置读取、迁移、校验回调和原子写入
+│  ├─ client_state.py                 # 无界面的账号队列状态与进度消息
+│  ├─ devices.py                      # MuMu/ADB 设备发现
+│  ├─ daily_rules.py                   # 日常 OCR 归一化、任务分类和几何规则
+│  ├─ maa_ops.py                      # Maa 作业等待、识别和执行辅助
+│  ├─ paths.py                        # 源码/便携版/运行时路径解析
+│  ├─ retry.py                         # 可注入的有限重试/恢复骨架
+│  ├─ self_check.py                    # 不初始化 GUI/设备的便携版自检
+│  └─ ui_helpers.py                   # 无界面的 UI 计算与列表辅助
+├─ docs/架构说明.md                   # 代码分层、文件分类和演进约定
 ├─ requirements.txt                  # MaaFramework Python 依赖范围
 ├─ requirements-build.txt            # PyInstaller 打包依赖
 ├─ FashionMallClient.spec            # Windows 便携版收集规则
