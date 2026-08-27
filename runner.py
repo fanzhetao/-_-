@@ -146,6 +146,19 @@ LOGIN_FAILURE_ENTRIES = (
     ("登录账号不存在提示", "账号不存在"),
     ("登录密码错误提示", "密码错误"),
 )
+GAME_ENTRY_TIMEOUT_SECONDS = 15.0
+GAME_ENTRY_POLL_TIMEOUT_MS = 100
+GAME_ENTRY_POLL_INTERVAL_SECONDS = 0.05
+GAME_ENTRY_READY_ENTRIES = (
+    "主界面已到达",
+    "离线收益弹窗",
+    "幸运赠礼弹窗",
+    "今日不再提示弹窗",
+    "每月签到弹窗",
+    "本次登录不再提示弹窗",
+    "任意活动稍后再去弹窗",
+    "商战冠军点击任意处弹窗",
+)
 LUCKY_DRAW_RESULT_TIMEOUT_SECONDS = 20.0
 ARTIST_PROMOTION_RESULT_TIMEOUT_SECONDS = 5.0
 PARTNER_CANDIDATE_ENTRIES = (
@@ -1034,6 +1047,96 @@ def wait_for_login_result(
         "登录后未检测到服务器页，也未捕获到账号不存在或密码错误提示。"
         "请检查模拟器当前页面后重试。"
     )
+
+
+def wait_for_game_entry_after_server(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+    timeout_seconds: float = GAME_ENTRY_TIMEOUT_SECONDS,
+) -> None:
+    """选服并点击开始后，限时确认已越过游戏加载进度条。"""
+    report(
+        "[进服检查] 已点击开始，等待进入游戏界面"
+        f"（最多 {timeout_seconds:g} 秒）"
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        for entry in GAME_ENTRY_READY_ENTRIES:
+            if _try_recognize_once(
+                tasker,
+                entry,
+                timeout_ms=GAME_ENTRY_POLL_TIMEOUT_MS,
+            ):
+                capture_debug_step(f"进服成功：已越过加载进度条（{entry}）")
+                report(f"[进服检查] 已进入游戏界面：{entry}")
+                return
+        time.sleep(GAME_ENTRY_POLL_INTERVAL_SECONDS)
+
+    capture_debug_step("进服超时：加载进度条持续超过15秒")
+    raise TimeoutError(
+        f"选服后加载超过 {timeout_seconds:g} 秒仍未进入游戏界面。"
+    )
+
+
+def login_and_enter_game(
+    tasker: Tasker,
+    controller: AdbController,
+    device,
+    account: str,
+    password: str,
+    server_number: int,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """完成登录；进服加载卡死时重启游戏，并从登录任务起点重来。"""
+    restart_count = 0
+    while True:
+        ensure_not_cancelled(cancel_event)
+        run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        validate_reference_canvas(controller, report)
+
+        run_task(tasker, "聚焦账号输入框", report, cancel_event)
+        replace_focused_text(device, account, "账号")
+        run_task(tasker, "账号输入已完成", report, cancel_event)
+
+        run_task(tasker, "聚焦密码输入框", report, cancel_event)
+        replace_focused_text(device, password, "密码")
+        run_task(tasker, "密码输入已完成", report, cancel_event)
+
+        ensure_checkbox_selected(
+            tasker,
+            "用户协议已勾选",
+            "勾选用户协议固定位置",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "点击登录按钮", report, cancel_event)
+        wait_for_login_result(tasker, report, cancel_event)
+        select_server(tasker, controller, server_number, report, cancel_event)
+        report(f"[选服] 已复核为 {server_number} 区，现在点击开始")
+        run_task(tasker, "点击开始按钮", report, cancel_event)
+
+        try:
+            wait_for_game_entry_after_server(tasker, report, cancel_event)
+        except TimeoutError:
+            restart_count += 1
+            report(
+                "[进服恢复] 加载进度条超过 "
+                f"{GAME_ENTRY_TIMEOUT_SECONDS:g} 秒仍未进入游戏界面，"
+                f"准备重启游戏并重新开始当前账号任务（第 {restart_count} 次）"
+            )
+            if not close_game_application(device, report):
+                raise RuntimeError(
+                    "进服加载超时，但游戏未能确认关闭，已停止自动恢复。"
+                )
+            ensure_not_cancelled(cancel_event)
+            continue
+
+        handle_delayed_popups(tasker, controller, report, cancel_event)
+        wait_for_main_screen(tasker, report, cancel_event)
+        return
 
 
 def try_recognize(
@@ -3852,31 +3955,16 @@ def run_automation(
             capture_debug_step("失败：MaaFramework Tasker 初始化")
             raise RuntimeError("MaaFramework Tasker 初始化失败。")
 
-        run_task(tasker, "打开游戏到登录页", report, cancel_event)
-        validate_reference_canvas(controller, report)
-
-        run_task(tasker, "聚焦账号输入框", report, cancel_event)
-        replace_focused_text(device, account, "账号")
-        run_task(tasker, "账号输入已完成", report, cancel_event)
-
-        run_task(tasker, "聚焦密码输入框", report, cancel_event)
-        replace_focused_text(device, password, "密码")
-        run_task(tasker, "密码输入已完成", report, cancel_event)
-
-        ensure_checkbox_selected(
+        login_and_enter_game(
             tasker,
-            "用户协议已勾选",
-            "勾选用户协议固定位置",
+            controller,
+            device,
+            account,
+            password,
+            server_number,
             report,
             cancel_event,
         )
-        run_task(tasker, "点击登录按钮", report, cancel_event)
-        wait_for_login_result(tasker, report, cancel_event)
-        select_server(tasker, controller, server_number, report, cancel_event)
-        report(f"[选服] 已复核为 {server_number} 区，现在点击开始")
-        run_task(tasker, "点击开始按钮", report, cancel_event)
-        handle_delayed_popups(tasker, controller, report, cancel_event)
-        wait_for_main_screen(tasker, report, cancel_event)
         complete_store_upgrade_from_home(tasker, controller, report, cancel_event)
         run_confirmed_transition(
             tasker,
