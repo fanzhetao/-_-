@@ -19,7 +19,7 @@ from maa.tasker import Tasker
 from maa.toolkit import AdbDevice, Toolkit
 
 from fashion_mall import config as config_store
-from fashion_mall import daily_rules, validation
+from fashion_mall import daily_rules, store_scan, validation
 from fashion_mall import devices as device_discovery
 from fashion_mall import maa_ops
 from fashion_mall import retry
@@ -126,6 +126,11 @@ DEPARTMENT_STORE_VERTICAL_VIEWPORTS = 8
 DEPARTMENT_STORE_HORIZONTAL_VIEWPORTS = 3
 DEPARTMENT_STORE_VERTICAL_REWIND_SWIPES = 6
 DEPARTMENT_STORE_HORIZONTAL_REWIND_SWIPES = 3
+STORE_CANDIDATE_LIMIT = 3
+STORE_SCAN_MAX_ROWS = 5
+STORE_SCAN_MAX_COLUMNS = 8
+STORE_RESET_SWIPES = 7
+STORE_SWIPE_SETTLE_SECONDS = 0.25
 DAILY_ACTION_RETRIES = 4
 DAILY_TRANSITION_CHECKS = 3
 DAILY_DESTINATION_TIMEOUT_MS = 2000
@@ -328,7 +333,16 @@ def load_account_configs(config: dict | None = None) -> list[dict]:
     )
 
 
-def save_account_configs(accounts: list[dict]) -> None:
+def load_continue_on_process_error(config: dict | None = None) -> bool:
+    """读取客户端的进程错误恢复模式。"""
+    if config is None:
+        config = load_local_config()
+    return config_store.load_continue_on_process_error(config)
+
+
+def save_account_configs(
+    accounts: list[dict], *, continue_on_process_error: bool = False
+) -> None:
     """原子保存账号队列；每个账号保留独立的启用状态。"""
     config_store.write_accounts(
         CLIENT_CONFIG_PATH,
@@ -337,6 +351,7 @@ def save_account_configs(accounts: list[dict]) -> None:
         validate_credential=validate_credential,
         validate_server_number=validate_server_number,
         validate_level=validate_cultivation_level,
+        continue_on_process_error=continue_on_process_error,
     )
 
 
@@ -2008,6 +2023,213 @@ def click_bottom_commercial_street(
     )
 
 
+def collect_department_store_viewport_ocr(tasker: Tasker) -> list[DailyOcrText]:
+    """读取百货当前视口的全部 OCR 文本，供店名与等级配对。"""
+    entry = "百货店铺OCR盘点"
+    override = {
+        entry: {
+            "recognition": "OCR",
+            "expected": ".+",
+            "roi": [0, 120, 720, 980],
+            "action": "DoNothing",
+            "next": [],
+            "pre_delay": 0,
+            "post_delay": 0,
+            "timeout": 3000,
+        }
+    }
+    job = tasker.post_task(entry, override)
+    job.wait()
+    if not job.succeeded:
+        return []
+    detail = job.get()
+    if detail is None:
+        return []
+
+    texts: list[DailyOcrText] = []
+    seen: set[tuple[str, tuple[int, int, int, int]]] = set()
+    for node in detail.nodes:
+        recognition = node.recognition
+        if recognition is None:
+            continue
+        for result in recognition.all_results:
+            text = getattr(result, "text", None)
+            box = getattr(result, "box", None)
+            if not text or box is None:
+                continue
+            item = (
+                daily_rules.normalize_ocr_text(str(text)),
+                tuple(int(value) for value in box),
+            )
+            if not item[0] or item in seen:
+                continue
+            seen.add(item)
+            texts.append(DailyOcrText(*item))
+    return texts
+
+
+def _store_swipe(controller: AdbController, direction: str, label: str) -> None:
+    swipes = {
+        "right": (550, 700, 170, 700, 420),
+        "left": (170, 700, 550, 700, 420),
+        "down": (400, 800, 400, 200, 520),
+    }
+    wait_job(controller.post_swipe(*swipes[direction]), label)
+    time.sleep(STORE_SWIPE_SETTLE_SECONDS)
+
+
+def reset_department_store_view(
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """使用场景中央安全坐标，把百货复位到左上角。"""
+    report("[百货盘点] 开始复位到左上角")
+    for _ in range(STORE_RESET_SWIPES):
+        ensure_not_cancelled(cancel_event)
+        wait_job(
+            controller.post_swipe(400, 200, 400, 800, 520),
+            "百货复位到顶部",
+        )
+        time.sleep(0.12)
+    for _ in range(STORE_RESET_SWIPES):
+        ensure_not_cancelled(cancel_event)
+        _store_swipe(controller, "left", "百货复位到左侧")
+    report("[百货盘点] 左上角复位完成")
+
+
+def scan_first_store_candidates(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> list[store_scan.StoreCandidate]:
+    """蛇形扫描，收集最先出现的三个绿色店铺及其等级后立即停止。"""
+    reset_department_store_view(controller, report, cancel_event)
+    candidates: list[store_scan.StoreCandidate] = []
+    path: list[str] = []
+    left_to_right = True
+
+    for row in range(1, STORE_SCAN_MAX_ROWS + 1):
+        for column in range(1, STORE_SCAN_MAX_COLUMNS + 1):
+            ensure_not_cancelled(cancel_event)
+            image = capture_screen(controller)
+            ocr_texts = collect_department_store_viewport_ocr(tasker)
+            before_count = len(candidates)
+            discovered = store_scan.collect_store_candidates(
+                ocr_texts, image, path=tuple(path)
+            )
+            store_scan.append_unique_candidates(
+                candidates, discovered, limit=STORE_CANDIDATE_LIMIT
+            )
+            for candidate in candidates[before_count:]:
+                report(
+                    f"[百货候选] {len(candidates[:candidate.discovery_order + 1])}. "
+                    f"{candidate.name}：{candidate.level}级"
+                )
+            capture_debug_step(f"百货店铺盘点：第 {row} 行第 {column} 个视口")
+            if len(candidates) >= STORE_CANDIDATE_LIMIT:
+                report("[百货盘点] 已收集最先出现的 3 家绿色店铺，停止扫描")
+                return candidates
+            if column == STORE_SCAN_MAX_COLUMNS:
+                continue
+            direction = "right" if left_to_right else "left"
+            _store_swipe(controller, direction, "横向蛇形扫描百货店铺")
+            path.append(direction)
+
+        if row == STORE_SCAN_MAX_ROWS:
+            break
+        _store_swipe(controller, "down", "纵向扫描下一层百货店铺")
+        path.append("down")
+        left_to_right = not left_to_right
+
+    if not candidates:
+        raise RuntimeError("蛇形扫描百货后，没有识别到可升级的绿色店铺及其等级。")
+    report(
+        f"[百货盘点] 扫描到边界前仅识别到 {len(candidates)} 家有效绿色店铺，"
+        "按已有候选继续"
+    )
+    return candidates
+
+
+def replay_store_path(
+    controller: AdbController,
+    path: tuple[str, ...],
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    reset_department_store_view(controller, report, cancel_event)
+    for direction in path:
+        ensure_not_cancelled(cancel_event)
+        _store_swipe(controller, direction, "重新定位最低等级店铺")
+
+
+def enter_selected_store(
+    tasker: Tasker,
+    controller: AdbController,
+    candidate: store_scan.StoreCandidate,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    replay_store_path(controller, candidate.path, report, cancel_event)
+    image = capture_screen(controller)
+    visible = store_scan.collect_store_candidates(
+        collect_department_store_viewport_ocr(tasker), image, path=candidate.path
+    )
+    confirmed = next((item for item in visible if item.name == candidate.name), None)
+    if confirmed is None:
+        raise RuntimeError(
+            f"重新定位后未能复核最低等级店铺：{candidate.name}。"
+        )
+    report(
+        f"[百货选择] 已复核 {confirmed.name}：{confirmed.level}级，点击店铺标签"
+    )
+    wait_job(controller.post_click(*confirmed.center), f"点击店铺：{confirmed.name}")
+    time.sleep(3.0)
+    run_task(tasker, "通用店铺界面已打开", report, cancel_event)
+
+
+def complete_store_upgrade_from_home(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """登录后直接从底部百货入口完成任意店铺升级，不经过日常前往。"""
+    report("[店铺升级] 从主页底部“百货”直接进入，不使用日常“前往”")
+    run_confirmed_transition(
+        tasker,
+        "点击底部百货标签",
+        "百货界面已打开",
+        report,
+        cancel_event,
+    )
+    candidates = scan_first_store_candidates(
+        tasker, controller, report, cancel_event
+    )
+    selected = store_scan.choose_lowest_store(candidates)
+    report(
+        f"[百货选择] 前 {len(candidates)} 家候选中最低等级："
+        f"{selected.name}，{selected.level}级"
+    )
+    enter_selected_store(
+        tasker, controller, selected, report, cancel_event
+    )
+    ensure_checkbox_selected(
+        tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
+    )
+    upgrade_store_with_expansion_fallback(tasker, controller, report, cancel_event)
+    run_confirmed_transition(
+        tasker,
+        "通用店铺返回百货",
+        "百货界面已打开",
+        report,
+        cancel_event,
+    )
+    click_bottom_commercial_street(tasker, report, cancel_event)
+    report("[店铺升级] 已完成登录后直达百货的升级流程并返回主页")
+
+
 def seek_department_store_shop(
     tasker: Tasker,
     controller: AdbController,
@@ -2638,10 +2860,10 @@ def complete_commercial_daily_group(
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    """仅执行盘点为待完成的百货任务，并复用已进入的百货页面。"""
+    """执行日常盘点后的百货组任务；店铺升级已在登录后独立完成。"""
     pending = {
         key
-        for key in ("store_upgrade", "fresh_stock", "lucky_draw", "club_exchange")
+        for key in ("fresh_stock", "lucky_draw", "club_exchange")
         if daily_plan.get(key) == DAILY_STATE_TODO
     }
     if not pending:
@@ -2651,45 +2873,12 @@ def complete_commercial_daily_group(
     report(f"[日常计划] 百货组待完成：{', '.join(sorted(pending))}")
     at_department_store = False
 
-    if "store_upgrade" in pending:
-        run_daily_forward(
-            tasker,
-            controller,
-            "任意店铺升级任务前往",
-            "百货界面已打开",
-            report,
-            cancel_event,
-        )
-        run_task(tasker, "百货界面已打开", report, cancel_event)
-        seek_department_store_shop(
-            tasker,
-            controller,
-            "点击生鲜超市入口",
-            "生鲜超市",
-            report,
-            cancel_event,
-        )
-        run_confirmed_transition(
-            tasker,
-            "点击生鲜超市入口",
-            "生鲜超市界面已打开",
-            report,
-            cancel_event,
-            action_already_performed=True,
-        )
-        ensure_checkbox_selected(
-            tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
-        )
-        upgrade_store_with_expansion_fallback(
-            tasker, controller, report, cancel_event
-        )
-        report("[日常计划] 已执行升级动作，稍后返回日常复核完成状态")
-    elif "fresh_stock" in pending:
+    if "fresh_stock" in pending:
         enter_fresh_supermarket_from_daily(
             tasker, controller, report, cancel_event
         )
 
-    if "store_upgrade" in pending or "fresh_stock" in pending:
+    if "fresh_stock" in pending:
         if "fresh_stock" in pending:
             run_confirmed_transition(
                 tasker,
@@ -2808,21 +2997,6 @@ def complete_commercial_daily_group(
         click_bottom_commercial_street(tasker, report, cancel_event)
         return_to_daily(tasker, report, cancel_event)
 
-    if "store_upgrade" in pending:
-        if not seek_daily_task(
-            tasker,
-            controller,
-            "任意店铺升级任务已完成",
-            report,
-            cancel_event,
-        ):
-            capture_debug_step("店铺升级后日常任务仍未完成")
-            raise RuntimeError(
-                "已执行店铺升级，但返回日常后未确认“任意店铺升级10次”完成。"
-            )
-        report("[日常计划] 已复核完成：任意店铺升级10次")
-
-
 def upgrade_store_with_expansion_fallback(
     tasker: Tasker,
     controller: AdbController,
@@ -2830,7 +3004,7 @@ def upgrade_store_with_expansion_fallback(
     cancel_event=None,
 ) -> None:
     """升级店铺；达到等级上限时先拓展，再重新执行连升十级。"""
-    run_task(tasker, "生鲜超市升级", report, cancel_event)
+    run_task(tasker, "通用店铺升级", report, cancel_event)
     reached_level_cap = try_recognize(
         tasker,
         "店铺达到最大等级提示",
@@ -2869,12 +3043,12 @@ def upgrade_store_with_expansion_fallback(
         report,
         cancel_event,
     )
-    run_task(tasker, "生鲜超市界面已打开", report, cancel_event)
+    run_task(tasker, "通用店铺界面已打开", report, cancel_event)
     ensure_checkbox_selected(
         tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
     )
     report("[店铺升级] 拓展完成，重新执行连升十级")
-    run_task(tasker, "生鲜超市升级", report, cancel_event)
+    run_task(tasker, "通用店铺升级", report, cancel_event)
     if try_recognize(
         tasker,
         "店铺达到最大等级提示",
@@ -3356,6 +3530,17 @@ def close_game_application(device, report: Reporter = print) -> bool:
     return True
 
 
+def close_game_after_process_error(report: Reporter = print) -> bool:
+    """进程错误恢复时重新发现设备，并关闭已确认包名的游戏进程。"""
+    devices = find_adb_devices()
+    if not devices:
+        report("[进程错误恢复] 没有发现 ADB 设备，无法关闭游戏")
+        return False
+    if len(devices) > 1:
+        report("[进程错误恢复] 发现多个 ADB 设备，使用列表中的第一个设备关闭游戏")
+    return close_game_application(devices[0], report)
+
+
 def complete_factory_research_daily(
     tasker: Tasker,
     controller: AdbController,
@@ -3681,6 +3866,7 @@ def run_automation(
         run_task(tasker, "点击开始按钮", report, cancel_event)
         handle_delayed_popups(tasker, controller, report, cancel_event)
         wait_for_main_screen(tasker, report, cancel_event)
+        complete_store_upgrade_from_home(tasker, controller, report, cancel_event)
         run_confirmed_transition(
             tasker,
             "点击日常",
@@ -3689,6 +3875,12 @@ def run_automation(
             cancel_event,
         )
         daily_plan = inventory_daily_tasks(tasker, controller, report, cancel_event)
+        if daily_plan.get("store_upgrade") == DAILY_STATE_TODO:
+            capture_debug_step("登录后店铺升级完成，但日常任务仍显示待完成")
+            raise RuntimeError(
+                "已从底部百货执行店铺升级，但日常盘点仍显示“任意店铺升级10次”待完成。"
+            )
+        report("[日常计划] 已复核登录后直达百货的店铺升级任务")
         complete_commercial_daily_group(
             tasker, controller, daily_plan, report, cancel_event
         )

@@ -17,6 +17,7 @@ if "--self-check" in sys.argv:
         _SELF_CHECK_MARKER.write_text("started\n", encoding="utf-8")
 
 from fashion_mall import client_state
+from fashion_mall.diagnostics import archive_recent_steps
 from fashion_mall.paths import resolve_paths
 from fashion_mall.ui_helpers import calculate_ui_scale, move_list_item
 
@@ -69,7 +70,8 @@ class FashionMallClient:
         self.root.geometry(self._centered_geometry(BASE_WINDOW_WIDTH, BASE_WINDOW_HEIGHT))
         self.root.minsize(self._px(MIN_WINDOW_WIDTH), self._px(MIN_WINDOW_HEIGHT))
 
-        account_configs = runner.load_account_configs()
+        local_config = runner.load_local_config()
+        account_configs = runner.load_account_configs(local_config)
         if not account_configs:
             account_configs = [
                 {"account": "", "password": "", "server_number": 1, "active": True}
@@ -81,6 +83,9 @@ class FashionMallClient:
         self.account_drag_changed = False
         self.account_drag_enabled = True
         self.show_password = tk.BooleanVar(value=False)
+        self.continue_on_process_error = tk.BooleanVar(
+            value=runner.load_continue_on_process_error(local_config)
+        )
         self.status = tk.StringVar(value="就绪")
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.cancel_event: threading.Event | None = None
@@ -131,7 +136,7 @@ class FashionMallClient:
         outer = ttk.Frame(self.root, padding=self._px(20))
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(4, weight=1)
+        outer.rowconfigure(5, weight=1)
 
         ttk.Label(
             outer,
@@ -200,9 +205,25 @@ class FashionMallClient:
         for account_config in self.initial_account_configs:
             self._add_account_row(account_config)
 
+        mode_frame = ttk.LabelFrame(outer, text="运行模式", padding=self._px(8))
+        mode_frame.grid(
+            row=2,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(self._px(12), 0),
+        )
+        self.process_error_mode_button = ttk.Checkbutton(
+            mode_frame,
+            text="进程错误时保存最近 5 步现场，关闭游戏并继续下一个账号",
+            variable=self.continue_on_process_error,
+        )
+        self.process_error_mode_button.grid(row=0, column=0, sticky="w")
+        self.account_widgets.append(self.process_error_mode_button)
+
         controls = ttk.Frame(outer)
         controls.grid(
-            row=2,
+            row=3,
             column=0,
             columnspan=3,
             sticky="ew",
@@ -219,11 +240,11 @@ class FashionMallClient:
         self.clear_button.grid(row=0, column=2, sticky="ew", padx=(self._px(6), 0))
 
         ttk.Label(outer, textvariable=self.status, foreground="#2563eb").grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(0, self._px(8))
+            row=4, column=0, columnspan=3, sticky="w", pady=(0, self._px(8))
         )
 
         log_frame = ttk.LabelFrame(outer, text="运行状态", padding=self._px(8))
-        log_frame.grid(row=4, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 10))
@@ -236,7 +257,7 @@ class FashionMallClient:
             outer,
             text="账号、密码、区号和培育档位会保存在 runtime/config/client_config.json。",
             foreground="#666666",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
 
         self.account_rows[0]["account_entry"].focus_set()
         self.root.bind("<Return>", lambda _event: self._start())
@@ -479,12 +500,16 @@ class FashionMallClient:
             return
 
         try:
-            runner.save_account_configs(accounts)
+            runner.save_account_configs(
+                accounts,
+                continue_on_process_error=bool(self.continue_on_process_error.get()),
+            )
         except (OSError, RuntimeError, ValueError) as error:
             messagebox.showerror("保存失败", f"无法写入本地配置：{error}", parent=self.root)
             return
 
         active_accounts = client_state.require_active_accounts(accounts)
+        continue_on_process_error = bool(self.continue_on_process_error.get())
         self.cancel_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
@@ -496,7 +521,7 @@ class FashionMallClient:
 
         self.worker = threading.Thread(
             target=self._run_worker,
-            args=(active_accounts, self.cancel_event),
+            args=(active_accounts, self.cancel_event, continue_on_process_error),
             daemon=True,
         )
         self.worker.start()
@@ -517,6 +542,8 @@ class FashionMallClient:
             row["frame"].destroy()
         self.account_rows.clear()
         self.account_widgets = self.account_widgets[:2]
+        self.account_widgets.append(self.process_error_mode_button)
+        self.continue_on_process_error.set(False)
         self._add_account_row()
         self._append_log("本地账号配置已删除。")
 
@@ -524,9 +551,11 @@ class FashionMallClient:
         self,
         accounts: list[dict],
         cancel_event: threading.Event,
+        continue_on_process_error: bool = False,
     ) -> None:
         try:
             total = len(accounts)
+            recovered_error_count = 0
             for index, account_config in enumerate(accounts, start=1):
                 runner.ensure_not_cancelled(cancel_event)
                 self._report(
@@ -534,17 +563,46 @@ class FashionMallClient:
                         index, total, account_config["server_number"]
                     )
                 )
-                completed = runner.run_automation(
-                    account_config["account"],
-                    account_config["password"],
-                    server_number=account_config["server_number"],
-                    cultivation_level=account_config.get(
-                        "cultivation_level", runner.DEFAULT_CULTIVATION_LEVEL
-                    ),
-                    report=self._report,
-                    cancel_event=cancel_event,
-                    debug_screenshot_dir=self.debug_screenshot_dir / f"account-{index}",
-                )
+                account_screenshot_dir = self.debug_screenshot_dir / f"account-{index}"
+                try:
+                    completed = runner.run_automation(
+                        account_config["account"],
+                        account_config["password"],
+                        server_number=account_config["server_number"],
+                        cultivation_level=account_config.get(
+                            "cultivation_level", runner.DEFAULT_CULTIVATION_LEVEL
+                        ),
+                        report=self._report,
+                        cancel_event=cancel_event,
+                        debug_screenshot_dir=account_screenshot_dir,
+                    )
+                except runner.AutomationCancelled:
+                    raise
+                except Exception as error:
+                    if not continue_on_process_error:
+                        raise
+                    archive_dir = archive_recent_steps(
+                        self.session_log_path,
+                        account_screenshot_dir,
+                        runner.RUNTIME_DIR / "error-diagnostics",
+                        account_index=index,
+                        error_message=str(error),
+                    )
+                    self._report(
+                        f"[进程错误恢复] 第 {index}/{total} 个账号执行异常；"
+                        f"最近 5 步现场已保存至：{archive_dir}"
+                    )
+                    if not runner.close_game_after_process_error(self._report):
+                        raise RuntimeError(
+                            "进程错误现场已保存，但游戏未能确认关闭；为避免影响下一个账号，账号队列已停止。"
+                        ) from error
+                    recovered_error_count += 1
+                    self._report(
+                        f"[进程错误恢复] 第 {index}/{total} 个账号已跳过，游戏已关闭"
+                    )
+                    if index < total:
+                        self._report("[账号队列] 即将重新打开游戏并执行下一个账号")
+                    continue
                 if not completed:
                     self._emit("incomplete", client_state.incomplete_message(index, total))
                     return
@@ -556,7 +614,14 @@ class FashionMallClient:
         except Exception as error:
             self._emit("error", str(error))
         else:
-            self._emit("done", f"账号队列已完成，共执行 {len(accounts)} 个账号。")
+            if recovered_error_count:
+                self._emit(
+                    "done_with_errors",
+                    f"账号队列已结束，共处理 {len(accounts)} 个账号；"
+                    f"其中 {recovered_error_count} 个账号发生进程错误并已保存现场。",
+                )
+            else:
+                self._emit("done", f"账号队列已完成，共执行 {len(accounts)} 个账号。")
 
     def _stop(self) -> None:
         if self.cancel_event is None:
@@ -582,6 +647,8 @@ class FashionMallClient:
                     self._append_log(message, persist=False)
                 elif kind == "done":
                     self._finish("已完成", message)
+                elif kind == "done_with_errors":
+                    self._finish("已结束（有错误）", message)
                 elif kind == "cancelled":
                     self._finish("已停止", message)
                 elif kind == "incomplete":

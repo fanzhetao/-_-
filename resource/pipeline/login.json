@@ -328,6 +328,12 @@
         "roi": [570, 850, 150, 330],
         "action": "DoNothing"
     },
+    "点击底部百货标签": {
+        "recognition": "DirectHit",
+        "action": "Click",
+        "target": [90, 1215],
+        "post_delay": 1500
+    },
     "点击日常": {
         "recognition": "DirectHit",
         "action": "Click",
@@ -526,6 +532,13 @@
         "box_index": 0,
         "timeout": 10000
     },
+    "百货店铺OCR盘点": {
+        "recognition": "OCR",
+        "expected": ".+",
+        "roi": [0, 120, 720, 980],
+        "action": "DoNothing",
+        "timeout": 3000
+    },
     "任意店铺升级任务前往": {
         "recognition": "And",
         "all_of": [
@@ -637,6 +650,23 @@
         "pre_delay": 5000,
         "timeout": 30000
     },
+    "通用店铺界面已打开": {
+        "recognition": "And",
+        "all_of": [
+            {
+                "recognition": "OCR",
+                "expected": "基础收入.*|其他加成.*",
+                "roi": [0, 850, 560, 430]
+            },
+            {
+                "recognition": "OCR",
+                "expected": "升级|业务|员工",
+                "roi": [480, 80, 240, 1200]
+            }
+        ],
+        "box_index": 0,
+        "timeout": 10000
+    },
     "连升十级已勾选": {
         "recognition": "ColorMatch",
         "roi": [590, 1239, 14, 12],
@@ -653,6 +683,13 @@
         "post_delay": 800
     },
     "生鲜超市升级": {
+        "recognition": "OCR",
+        "expected": "^升级$",
+        "roi": [520, 1030, 200, 180],
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "通用店铺升级": {
         "recognition": "OCR",
         "expected": "^升级$",
         "roi": [520, 1030, 200, 180],
@@ -742,6 +779,12 @@
         "recognition": "DirectHit",
         "action": "Click",
         "target": [50, 1230],
+        "post_delay": 1000
+    },
+    "通用店铺返回百货": {
+        "recognition": "DirectHit",
+        "target": [50, 1230],
+        "action": "Click",
         "post_delay": 1000
     },
     "点击幸运扭蛋": {
