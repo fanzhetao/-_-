@@ -20,6 +20,12 @@ def move_list_item(items: list, item, target_index: int) -> bool:
     return True
 
 
+def drag_insertion_index(pointer_y: int, other_row_centers: list[int]) -> int:
+    """根据指针越过的其他行中心数，计算稳定的拖放插入位置。"""
+
+    return sum(pointer_y > center for center in other_row_centers)
+
+
 def calculate_ui_scale(screen_width: int, screen_height: int, dpi: float) -> float:
     """按屏幕分辨率和 DPI 计算 1.0～2.0 的窗口缩放比例。"""
 

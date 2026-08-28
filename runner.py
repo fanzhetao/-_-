@@ -19,7 +19,7 @@ from maa.tasker import Tasker
 from maa.toolkit import AdbDevice, Toolkit
 
 from fashion_mall import config as config_store
-from fashion_mall import daily_rules, validation
+from fashion_mall import daily_rules, store_scan, validation
 from fashion_mall import devices as device_discovery
 from fashion_mall import maa_ops
 from fashion_mall import retry
@@ -126,6 +126,11 @@ DEPARTMENT_STORE_VERTICAL_VIEWPORTS = 8
 DEPARTMENT_STORE_HORIZONTAL_VIEWPORTS = 3
 DEPARTMENT_STORE_VERTICAL_REWIND_SWIPES = 6
 DEPARTMENT_STORE_HORIZONTAL_REWIND_SWIPES = 3
+STORE_CANDIDATE_LIMIT = 3
+STORE_SCAN_MAX_ROWS = 5
+STORE_SCAN_MAX_COLUMNS = 8
+STORE_RESET_SWIPES = 7
+STORE_SWIPE_SETTLE_SECONDS = 0.25
 DAILY_ACTION_RETRIES = 4
 DAILY_TRANSITION_CHECKS = 3
 DAILY_DESTINATION_TIMEOUT_MS = 2000
@@ -141,6 +146,24 @@ LOGIN_FAILURE_ENTRIES = (
     ("登录账号不存在提示", "账号不存在"),
     ("登录密码错误提示", "密码错误"),
 )
+GAME_ENTRY_TIMEOUT_SECONDS = 15.0
+GAME_ENTRY_POLL_TIMEOUT_MS = 100
+GAME_ENTRY_POLL_INTERVAL_SECONDS = 0.05
+GAME_ENTRY_READY_ENTRIES = (
+    "主界面已到达",
+    "离线收益弹窗",
+    "幸运赠礼弹窗",
+    "今日不再提示弹窗",
+    "每月签到弹窗",
+    "本次登录不再提示弹窗",
+    "任意活动稍后再去弹窗",
+    "商战冠军点击任意处弹窗",
+)
+COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS = 2
+COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS = 120.0
+COMMERCIAL_BATTLE_RESULT_POLL_TIMEOUT_MS = 250
+COMMERCIAL_BATTLE_RESULT_CLICK_INTERVAL_SECONDS = 1.0
+COMMERCIAL_BATTLE_RESULT_CLICK_POSITION = (360, 1120)
 LUCKY_DRAW_RESULT_TIMEOUT_SECONDS = 20.0
 ARTIST_PROMOTION_RESULT_TIMEOUT_SECONDS = 5.0
 PARTNER_CANDIDATE_ENTRIES = (
@@ -150,6 +173,7 @@ PARTNER_CANDIDATE_ENTRIES = (
 )
 CULTIVATION_LEVELS = ("入门培育", "初级培育", "中级培育", "高级培育")
 DEFAULT_CULTIVATION_LEVEL = CULTIVATION_LEVELS[0]
+DEFAULT_CULTIVATION_LEVELS = CULTIVATION_LEVELS[:3]
 CULTIVATION_ACTION_ENTRIES = {
     "入门培育": "执行入门培育",
     "初级培育": "执行初级培育",
@@ -157,6 +181,9 @@ CULTIVATION_ACTION_ENTRIES = {
     "高级培育": "执行高级培育",
 }
 FLOWER_ROOM_ENTRY_FIXED_ATTEMPTS = 3
+DEBUTANTE_ENTRY_RESULT_TIMEOUT_SECONDS = 5.0
+DEBUTANTE_ENTRY_POLL_TIMEOUT_MS = 250
+DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS = 0.05
 MANOR_SUPPLY_ENTRY_OCR_ATTEMPTS = 12
 MANOR_SUPPLY_ENTRY_OCR_TIMEOUT_MS = 500
 MANOR_SUPPLY_ENTRY_POLL_INTERVAL_SECONDS = 0.15
@@ -308,9 +335,36 @@ def normalize_cultivation_level(value) -> str:
     )
 
 
+def normalize_cultivation_levels(value) -> list[str]:
+    return config_store.normalize_levels(
+        value, CULTIVATION_LEVELS, DEFAULT_CULTIVATION_LEVELS
+    )
+
+
 def validate_cultivation_level(value) -> str:
     normalized = str(value or "").strip()
     if normalized not in CULTIVATION_LEVELS:
+        raise RuntimeError(
+            "花房培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
+        )
+    return normalized
+
+
+def validate_cultivation_levels(value) -> list[str]:
+    if isinstance(value, str):
+        requested = [value]
+    elif isinstance(value, (list, tuple, set)):
+        requested = list(value)
+    else:
+        requested = []
+    normalized = []
+    for level in CULTIVATION_LEVELS:
+        if level in requested and level not in normalized:
+            normalized.append(level)
+    if not normalized:
+        raise RuntimeError("请至少选择一个花房培育档位。")
+    invalid = [str(level) for level in requested if level not in CULTIVATION_LEVELS]
+    if invalid:
         raise RuntimeError(
             "花房培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
         )
@@ -324,19 +378,49 @@ def load_account_configs(config: dict | None = None) -> list[dict]:
     return config_store.load_accounts(
         config,
         levels=CULTIVATION_LEVELS,
-        default_level=DEFAULT_CULTIVATION_LEVEL,
+        default_levels=DEFAULT_CULTIVATION_LEVELS,
     )
 
 
-def save_account_configs(accounts: list[dict]) -> None:
+def load_continue_on_process_error(config: dict | None = None) -> bool:
+    """读取客户端的进程错误恢复模式。"""
+    if config is None:
+        config = load_local_config()
+    return config_store.load_continue_on_process_error(config)
+
+
+def load_package_error_diagnostics(config: dict | None = None) -> bool:
+    """读取客户端的报错诊断包开关。"""
+    if config is None:
+        config = load_local_config()
+    return config_store.load_package_error_diagnostics(config)
+
+
+def load_continue_on_task_error(config: dict | None = None) -> bool:
+    """读取业务任务出错后视为完成并继续的运行模式。"""
+    if config is None:
+        config = load_local_config()
+    return config_store.load_continue_on_task_error(config)
+
+
+def save_account_configs(
+    accounts: list[dict],
+    *,
+    continue_on_process_error: bool = False,
+    package_error_diagnostics: bool = True,
+    continue_on_task_error: bool = False,
+) -> None:
     """原子保存账号队列；每个账号保留独立的启用状态。"""
     config_store.write_accounts(
         CLIENT_CONFIG_PATH,
         accounts,
-        default_level=DEFAULT_CULTIVATION_LEVEL,
+        default_levels=DEFAULT_CULTIVATION_LEVELS,
         validate_credential=validate_credential,
         validate_server_number=validate_server_number,
-        validate_level=validate_cultivation_level,
+        validate_levels=validate_cultivation_levels,
+        continue_on_process_error=continue_on_process_error,
+        package_error_diagnostics=package_error_diagnostics,
+        continue_on_task_error=continue_on_task_error,
     )
 
 
@@ -344,15 +428,16 @@ def save_local_config(
     account: str,
     password: str,
     server_number: int,
-    cultivation_level: str = DEFAULT_CULTIVATION_LEVEL,
+    cultivation_levels=None,
 ) -> None:
+    cultivation_levels = normalize_cultivation_levels(cultivation_levels)
     save_account_configs(
         [
             {
                 "account": account,
                 "password": password,
                 "server_number": server_number,
-                "cultivation_level": cultivation_level,
+                "cultivation_levels": cultivation_levels,
                 "active": True,
             }
         ]
@@ -1010,6 +1095,96 @@ def wait_for_login_result(
     )
 
 
+def wait_for_game_entry_after_server(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+    timeout_seconds: float = GAME_ENTRY_TIMEOUT_SECONDS,
+) -> None:
+    """选服并点击开始后，限时确认已越过游戏加载进度条。"""
+    report(
+        "[进服检查] 已点击开始，等待进入游戏界面"
+        f"（最多 {timeout_seconds:g} 秒）"
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        for entry in GAME_ENTRY_READY_ENTRIES:
+            if _try_recognize_once(
+                tasker,
+                entry,
+                timeout_ms=GAME_ENTRY_POLL_TIMEOUT_MS,
+            ):
+                capture_debug_step(f"进服成功：已越过加载进度条（{entry}）")
+                report(f"[进服检查] 已进入游戏界面：{entry}")
+                return
+        time.sleep(GAME_ENTRY_POLL_INTERVAL_SECONDS)
+
+    capture_debug_step("进服超时：加载进度条持续超过15秒")
+    raise TimeoutError(
+        f"选服后加载超过 {timeout_seconds:g} 秒仍未进入游戏界面。"
+    )
+
+
+def login_and_enter_game(
+    tasker: Tasker,
+    controller: AdbController,
+    device,
+    account: str,
+    password: str,
+    server_number: int,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """完成登录；进服加载卡死时重启游戏，并从登录任务起点重来。"""
+    restart_count = 0
+    while True:
+        ensure_not_cancelled(cancel_event)
+        run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        validate_reference_canvas(controller, report)
+
+        run_task(tasker, "聚焦账号输入框", report, cancel_event)
+        replace_focused_text(device, account, "账号")
+        run_task(tasker, "账号输入已完成", report, cancel_event)
+
+        run_task(tasker, "聚焦密码输入框", report, cancel_event)
+        replace_focused_text(device, password, "密码")
+        run_task(tasker, "密码输入已完成", report, cancel_event)
+
+        ensure_checkbox_selected(
+            tasker,
+            "用户协议已勾选",
+            "勾选用户协议固定位置",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "点击登录按钮", report, cancel_event)
+        wait_for_login_result(tasker, report, cancel_event)
+        select_server(tasker, controller, server_number, report, cancel_event)
+        report(f"[选服] 已复核为 {server_number} 区，现在点击开始")
+        run_task(tasker, "点击开始按钮", report, cancel_event)
+
+        try:
+            wait_for_game_entry_after_server(tasker, report, cancel_event)
+        except TimeoutError:
+            restart_count += 1
+            report(
+                "[进服恢复] 加载进度条超过 "
+                f"{GAME_ENTRY_TIMEOUT_SECONDS:g} 秒仍未进入游戏界面，"
+                f"准备重启游戏并重新开始当前账号任务（第 {restart_count} 次）"
+            )
+            if not close_game_application(device, report):
+                raise RuntimeError(
+                    "进服加载超时，但游戏未能确认关闭，已停止自动恢复。"
+                )
+            ensure_not_cancelled(cancel_event)
+            continue
+
+        handle_delayed_popups(tasker, controller, report, cancel_event)
+        wait_for_main_screen(tasker, report, cancel_event)
+        return
+
+
 def try_recognize(
     tasker: Tasker,
     entry: str,
@@ -1583,18 +1758,31 @@ def drain_visible_daily_rewards(
     report: Reporter = print,
     cancel_event=None,
 ) -> int:
+    """领取当前视口奖励，避免每个空动作都重复执行整套弹窗巡检。"""
     claimed = 0
     for _ in range(30):
         ensure_not_cancelled(cancel_event)
-        if try_execute(tasker, "日常奖励确定", report, cancel_event):
+        if _try_execute_once(tasker, "日常奖励确定", POPUP_POLL_TIMEOUT_MS):
             report("[日常] 点击奖励确定")
             time.sleep(0.2)
             continue
-        if not try_execute(tasker, "日常领取按钮", report, cancel_event):
-            break
-        claimed += 1
-        report(f"[日常] 已领取 {claimed} 项当前可见奖励")
-        time.sleep(0.25)
+        if _try_execute_once(tasker, "日常领取按钮", POPUP_POLL_TIMEOUT_MS):
+            claimed += 1
+            report(f"[日常] 已领取 {claimed} 项当前可见奖励")
+            time.sleep(0.25)
+            continue
+
+        # 两个奖励动作都不存在时只巡检一次中断弹窗；若确实清除了弹窗，
+        # 回到循环重新识别奖励，否则当前视口已经排空。
+        if handle_interrupting_popups(
+            tasker,
+            report,
+            cancel_event,
+            detection_timeout_ms=POPUP_POLL_TIMEOUT_MS,
+        ):
+            report("[弹窗恢复] 已清除奖励扫描期间的中断弹窗")
+            continue
+        break
     return claimed
 
 
@@ -2006,6 +2194,213 @@ def click_bottom_commercial_street(
         report,
         cancel_event,
     )
+
+
+def collect_department_store_viewport_ocr(tasker: Tasker) -> list[DailyOcrText]:
+    """读取百货当前视口的全部 OCR 文本，供店名与等级配对。"""
+    entry = "百货店铺OCR盘点"
+    override = {
+        entry: {
+            "recognition": "OCR",
+            "expected": ".+",
+            "roi": [0, 120, 720, 980],
+            "action": "DoNothing",
+            "next": [],
+            "pre_delay": 0,
+            "post_delay": 0,
+            "timeout": 3000,
+        }
+    }
+    job = tasker.post_task(entry, override)
+    job.wait()
+    if not job.succeeded:
+        return []
+    detail = job.get()
+    if detail is None:
+        return []
+
+    texts: list[DailyOcrText] = []
+    seen: set[tuple[str, tuple[int, int, int, int]]] = set()
+    for node in detail.nodes:
+        recognition = node.recognition
+        if recognition is None:
+            continue
+        for result in recognition.all_results:
+            text = getattr(result, "text", None)
+            box = getattr(result, "box", None)
+            if not text or box is None:
+                continue
+            item = (
+                daily_rules.normalize_ocr_text(str(text)),
+                tuple(int(value) for value in box),
+            )
+            if not item[0] or item in seen:
+                continue
+            seen.add(item)
+            texts.append(DailyOcrText(*item))
+    return texts
+
+
+def _store_swipe(controller: AdbController, direction: str, label: str) -> None:
+    swipes = {
+        "right": (550, 700, 170, 700, 420),
+        "left": (170, 700, 550, 700, 420),
+        "down": (400, 800, 400, 200, 520),
+    }
+    wait_job(controller.post_swipe(*swipes[direction]), label)
+    time.sleep(STORE_SWIPE_SETTLE_SECONDS)
+
+
+def reset_department_store_view(
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """使用场景中央安全坐标，把百货复位到左上角。"""
+    report("[百货盘点] 开始复位到左上角")
+    for _ in range(STORE_RESET_SWIPES):
+        ensure_not_cancelled(cancel_event)
+        wait_job(
+            controller.post_swipe(400, 200, 400, 800, 520),
+            "百货复位到顶部",
+        )
+        time.sleep(0.12)
+    for _ in range(STORE_RESET_SWIPES):
+        ensure_not_cancelled(cancel_event)
+        _store_swipe(controller, "left", "百货复位到左侧")
+    report("[百货盘点] 左上角复位完成")
+
+
+def scan_first_store_candidates(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> list[store_scan.StoreCandidate]:
+    """蛇形扫描，收集最先出现的三个绿色店铺及其等级后立即停止。"""
+    reset_department_store_view(controller, report, cancel_event)
+    candidates: list[store_scan.StoreCandidate] = []
+    path: list[str] = []
+    left_to_right = True
+
+    for row in range(1, STORE_SCAN_MAX_ROWS + 1):
+        for column in range(1, STORE_SCAN_MAX_COLUMNS + 1):
+            ensure_not_cancelled(cancel_event)
+            image = capture_screen(controller)
+            ocr_texts = collect_department_store_viewport_ocr(tasker)
+            before_count = len(candidates)
+            discovered = store_scan.collect_store_candidates(
+                ocr_texts, image, path=tuple(path)
+            )
+            store_scan.append_unique_candidates(
+                candidates, discovered, limit=STORE_CANDIDATE_LIMIT
+            )
+            for candidate in candidates[before_count:]:
+                report(
+                    f"[百货候选] {len(candidates[:candidate.discovery_order + 1])}. "
+                    f"{candidate.name}：{candidate.level}级"
+                )
+            capture_debug_step(f"百货店铺盘点：第 {row} 行第 {column} 个视口")
+            if len(candidates) >= STORE_CANDIDATE_LIMIT:
+                report("[百货盘点] 已收集最先出现的 3 家绿色店铺，停止扫描")
+                return candidates
+            if column == STORE_SCAN_MAX_COLUMNS:
+                continue
+            direction = "right" if left_to_right else "left"
+            _store_swipe(controller, direction, "横向蛇形扫描百货店铺")
+            path.append(direction)
+
+        if row == STORE_SCAN_MAX_ROWS:
+            break
+        _store_swipe(controller, "down", "纵向扫描下一层百货店铺")
+        path.append("down")
+        left_to_right = not left_to_right
+
+    if not candidates:
+        raise RuntimeError("蛇形扫描百货后，没有识别到可升级的绿色店铺及其等级。")
+    report(
+        f"[百货盘点] 扫描到边界前仅识别到 {len(candidates)} 家有效绿色店铺，"
+        "按已有候选继续"
+    )
+    return candidates
+
+
+def replay_store_path(
+    controller: AdbController,
+    path: tuple[str, ...],
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    reset_department_store_view(controller, report, cancel_event)
+    for direction in path:
+        ensure_not_cancelled(cancel_event)
+        _store_swipe(controller, direction, "重新定位最低等级店铺")
+
+
+def enter_selected_store(
+    tasker: Tasker,
+    controller: AdbController,
+    candidate: store_scan.StoreCandidate,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    replay_store_path(controller, candidate.path, report, cancel_event)
+    image = capture_screen(controller)
+    visible = store_scan.collect_store_candidates(
+        collect_department_store_viewport_ocr(tasker), image, path=candidate.path
+    )
+    confirmed = next((item for item in visible if item.name == candidate.name), None)
+    if confirmed is None:
+        raise RuntimeError(
+            f"重新定位后未能复核最低等级店铺：{candidate.name}。"
+        )
+    report(
+        f"[百货选择] 已复核 {confirmed.name}：{confirmed.level}级，点击店铺标签"
+    )
+    wait_job(controller.post_click(*confirmed.center), f"点击店铺：{confirmed.name}")
+    time.sleep(3.0)
+    run_task(tasker, "通用店铺界面已打开", report, cancel_event)
+
+
+def complete_store_upgrade_from_home(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """登录后直接从底部百货入口完成任意店铺升级，不经过日常前往。"""
+    report("[店铺升级] 从主页底部“百货”直接进入，不使用日常“前往”")
+    run_confirmed_transition(
+        tasker,
+        "点击底部百货标签",
+        "百货界面已打开",
+        report,
+        cancel_event,
+    )
+    candidates = scan_first_store_candidates(
+        tasker, controller, report, cancel_event
+    )
+    selected = store_scan.choose_lowest_store(candidates)
+    report(
+        f"[百货选择] 前 {len(candidates)} 家候选中最低等级："
+        f"{selected.name}，{selected.level}级"
+    )
+    enter_selected_store(
+        tasker, controller, selected, report, cancel_event
+    )
+    ensure_checkbox_selected(
+        tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
+    )
+    upgrade_store_with_expansion_fallback(tasker, controller, report, cancel_event)
+    run_confirmed_transition(
+        tasker,
+        "通用店铺返回百货",
+        "百货界面已打开",
+        report,
+        cancel_event,
+    )
+    click_bottom_commercial_street(tasker, report, cancel_event)
+    report("[店铺升级] 已完成登录后直达百货的升级流程并返回主页")
 
 
 def seek_department_store_shop(
@@ -2638,10 +3033,10 @@ def complete_commercial_daily_group(
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    """仅执行盘点为待完成的百货任务，并复用已进入的百货页面。"""
+    """执行日常盘点后的百货组任务；店铺升级已在登录后独立完成。"""
     pending = {
         key
-        for key in ("store_upgrade", "fresh_stock", "lucky_draw", "club_exchange")
+        for key in ("fresh_stock", "lucky_draw", "club_exchange")
         if daily_plan.get(key) == DAILY_STATE_TODO
     }
     if not pending:
@@ -2651,45 +3046,12 @@ def complete_commercial_daily_group(
     report(f"[日常计划] 百货组待完成：{', '.join(sorted(pending))}")
     at_department_store = False
 
-    if "store_upgrade" in pending:
-        run_daily_forward(
-            tasker,
-            controller,
-            "任意店铺升级任务前往",
-            "百货界面已打开",
-            report,
-            cancel_event,
-        )
-        run_task(tasker, "百货界面已打开", report, cancel_event)
-        seek_department_store_shop(
-            tasker,
-            controller,
-            "点击生鲜超市入口",
-            "生鲜超市",
-            report,
-            cancel_event,
-        )
-        run_confirmed_transition(
-            tasker,
-            "点击生鲜超市入口",
-            "生鲜超市界面已打开",
-            report,
-            cancel_event,
-            action_already_performed=True,
-        )
-        ensure_checkbox_selected(
-            tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
-        )
-        upgrade_store_with_expansion_fallback(
-            tasker, controller, report, cancel_event
-        )
-        report("[日常计划] 已执行升级动作，稍后返回日常复核完成状态")
-    elif "fresh_stock" in pending:
+    if "fresh_stock" in pending:
         enter_fresh_supermarket_from_daily(
             tasker, controller, report, cancel_event
         )
 
-    if "store_upgrade" in pending or "fresh_stock" in pending:
+    if "fresh_stock" in pending:
         if "fresh_stock" in pending:
             run_confirmed_transition(
                 tasker,
@@ -2808,21 +3170,6 @@ def complete_commercial_daily_group(
         click_bottom_commercial_street(tasker, report, cancel_event)
         return_to_daily(tasker, report, cancel_event)
 
-    if "store_upgrade" in pending:
-        if not seek_daily_task(
-            tasker,
-            controller,
-            "任意店铺升级任务已完成",
-            report,
-            cancel_event,
-        ):
-            capture_debug_step("店铺升级后日常任务仍未完成")
-            raise RuntimeError(
-                "已执行店铺升级，但返回日常后未确认“任意店铺升级10次”完成。"
-            )
-        report("[日常计划] 已复核完成：任意店铺升级10次")
-
-
 def upgrade_store_with_expansion_fallback(
     tasker: Tasker,
     controller: AdbController,
@@ -2830,7 +3177,7 @@ def upgrade_store_with_expansion_fallback(
     cancel_event=None,
 ) -> None:
     """升级店铺；达到等级上限时先拓展，再重新执行连升十级。"""
-    run_task(tasker, "生鲜超市升级", report, cancel_event)
+    run_task(tasker, "通用店铺升级", report, cancel_event)
     reached_level_cap = try_recognize(
         tasker,
         "店铺达到最大等级提示",
@@ -2869,12 +3216,12 @@ def upgrade_store_with_expansion_fallback(
         report,
         cancel_event,
     )
-    run_task(tasker, "生鲜超市界面已打开", report, cancel_event)
+    run_task(tasker, "通用店铺界面已打开", report, cancel_event)
     ensure_checkbox_selected(
         tasker, "连升十级已勾选", "勾选连升十级", report, cancel_event
     )
     report("[店铺升级] 拓展完成，重新执行连升十级")
-    run_task(tasker, "生鲜超市升级", report, cancel_event)
+    run_task(tasker, "通用店铺升级", report, cancel_event)
     if try_recognize(
         tasker,
         "店铺达到最大等级提示",
@@ -3012,19 +3359,54 @@ def complete_partner_daily_group(
 
 def enter_debutante_club_from_main(
     tasker: Tasker,
+    controller: AdbController,
     report: Reporter = print,
     cancel_event=None,
-) -> None:
-    """使用校准固定位置进入名媛会，避开装饰字和引导手指对 OCR 的干扰。"""
+) -> bool:
+    """进入名媛会；账号未加入时关闭提示并返回 False。"""
     report("[名媛会入口] 使用校准固定位置 (365, 680) 进入名媛会")
-    run_confirmed_transition(
-        tasker,
-        "点击主页名媛会入口固定位置",
-        "名媛会界面已打开",
-        report,
-        cancel_event,
+    run_task(tasker, "点击主页名媛会入口固定位置", report, cancel_event)
+    deadline = time.monotonic() + DEBUTANTE_ENTRY_RESULT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        if _try_recognize_once(
+            tasker,
+            "名媛会未加入提示",
+            timeout_ms=DEBUTANTE_ENTRY_POLL_TIMEOUT_MS,
+        ):
+            capture_debug_step("识别到账号未加入名媛会")
+            report(
+                "[名媛会入口] 识别到“您还未加入名媛会，请选择”，"
+                "本账号跳过名媛会相关流程"
+            )
+            wait_job(
+                controller.post_shell("input keyevent 4"),
+                "关闭未加入名媛会提示",
+            )
+            if not _transition_confirmed(
+                tasker,
+                "主界面已到达",
+                report,
+                cancel_event,
+            ):
+                raise RuntimeError(
+                    "已识别账号未加入名媛会，但关闭提示后未能确认返回主页。"
+                )
+            report("[名媛会入口] 未加入提示已关闭，已确认返回主页")
+            return False
+        if _try_recognize_once(
+            tasker,
+            "名媛会界面已打开",
+            timeout_ms=DEBUTANTE_ENTRY_POLL_TIMEOUT_MS,
+        ):
+            report("[名媛会入口] 已确认通过固定位置进入名媛会")
+            return True
+        time.sleep(DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS)
+
+    capture_debug_step("名媛会入口结果未识别")
+    raise RuntimeError(
+        "点击名媛会入口后，既未确认进入名媛会，也未识别到未加入提示。"
     )
-    report("[名媛会入口] 已确认通过固定位置进入名媛会")
 
 
 def enter_flower_room_from_debutante_club(
@@ -3088,19 +3470,23 @@ def complete_lady_cultivation_daily(
     tasker: Tasker,
     controller: AdbController,
     daily_plan: dict[str, str],
-    cultivation_level: str,
+    cultivation_levels,
     report: Reporter = print,
     cancel_event=None,
-) -> None:
-    cultivation_level = validate_cultivation_level(cultivation_level)
+) -> bool:
+    cultivation_levels = validate_cultivation_levels(cultivation_levels)
     if daily_plan.get("lady_cultivation") != DAILY_STATE_TODO:
         report(
             "[日常计划] 跳过名媛会培育1次："
             f"状态={daily_plan.get('lady_cultivation', DAILY_STATE_UNKNOWN)}"
         )
-        return
+        return False
 
-    report(f"[日常计划] 执行名媛会培育1次；档位={cultivation_level}")
+    level_summary = "、".join(cultivation_levels)
+    report(
+        f"[日常计划] 执行名媛会培育；共 {len(cultivation_levels)} 档："
+        f"{level_summary}"
+    )
     run_daily_forward(
         tasker,
         controller,
@@ -3109,19 +3495,28 @@ def complete_lady_cultivation_daily(
         report,
         cancel_event,
     )
-    enter_debutante_club_from_main(tasker, report, cancel_event)
+    if not enter_debutante_club_from_main(
+        tasker, controller, report, cancel_event
+    ):
+        return_to_daily(tasker, report, cancel_event)
+        report("[日常计划] 已跳过名媛会培育和庄园补给，并返回日常页")
+        return False
     enter_flower_room_from_debutante_club(tasker, report, cancel_event)
-    action_entry = CULTIVATION_ACTION_ENTRIES[cultivation_level]
-    report(f"[花房培育] 选择{cultivation_level}")
-    run_task(tasker, action_entry, report, cancel_event)
-    dismiss_result_overlay(
-        tasker,
-        controller,
-        "花房培育恭喜获得弹层",
-        report,
-        cancel_event,
-    )
-    run_task(tasker, "花房培育界面已打开", report, cancel_event)
+    for index, cultivation_level in enumerate(cultivation_levels, start=1):
+        action_entry = CULTIVATION_ACTION_ENTRIES[cultivation_level]
+        report(
+            f"[花房培育] 执行第 {index}/{len(cultivation_levels)} 档："
+            f"{cultivation_level}"
+        )
+        run_task(tasker, action_entry, report, cancel_event)
+        dismiss_result_overlay(
+            tasker,
+            controller,
+            "花房培育恭喜获得弹层",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "花房培育界面已打开", report, cancel_event)
     run_confirmed_transition(
         tasker,
         "花房培育返回名媛会",
@@ -3129,7 +3524,8 @@ def complete_lady_cultivation_daily(
         report,
         cancel_event,
     )
-    report(f"[日常计划] 已执行：名媛会培育1次（{cultivation_level}）")
+    report(f"[日常计划] 已执行名媛会培育：{level_summary}")
+    return True
 
 
 def enter_manor_supply_from_debutante_club(
@@ -3354,6 +3750,17 @@ def close_game_application(device, report: Reporter = print) -> bool:
         "未关闭模拟器，自动化客户端保持打开"
     )
     return True
+
+
+def close_game_after_process_error(report: Reporter = print) -> bool:
+    """进程错误恢复时重新发现设备，并关闭已确认包名的游戏进程。"""
+    devices = find_adb_devices()
+    if not devices:
+        report("[进程错误恢复] 没有发现 ADB 设备，无法关闭游戏")
+        return False
+    if len(devices) > 1:
+        report("[进程错误恢复] 发现多个 ADB 设备，使用列表中的第一个设备关闭游戏")
+    return close_game_application(devices[0], report)
 
 
 def complete_factory_research_daily(
@@ -3596,22 +4003,172 @@ def replace_focused_text(device, value: str, label: str) -> None:
     run_adb_shell_from_stdin(device, f"input text {escaped_value}", f"输入{label}")
 
 
+def enter_commercial_battle_from_home(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """从主页进入商战；文字入口优先，固定坐标兜底。"""
+    report("[商战入口] 从主页查找“商战”文字")
+    if _try_execute_once(
+        tasker,
+        "点击主页商战入口",
+        timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+    ):
+        report("[商战入口] 已按 OCR 文字位置点击")
+        if _transition_confirmed(
+            tasker,
+            "商战界面已打开",
+            report,
+            cancel_event,
+        ):
+            report("[商战入口] 已确认进入商战页面")
+            return
+        report("[商战入口] OCR 点击后未确认目标页，改用固定位置")
+    else:
+        report("[商战入口] 未识别到入口文字，使用固定位置 (180, 850)")
+
+    for attempt in range(1, COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS + 1):
+        ensure_not_cancelled(cancel_event)
+        run_task(tasker, "点击主页商战入口固定位置", report, cancel_event)
+        if _transition_confirmed(
+            tasker,
+            "商战界面已打开",
+            report,
+            cancel_event,
+        ):
+            report(
+                "[商战入口] 固定位置进入成功"
+                f"（{attempt}/{COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS}）"
+            )
+            return
+        report(
+            "[商战入口] 固定位置点击后未确认目标页，准备重试"
+            f"（{attempt}/{COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS}）"
+        )
+
+    capture_debug_step("主页商战入口连续点击后仍未进入")
+    raise RuntimeError("从主页点击商战入口后，未能确认进入商战页面。")
+
+
+def wait_for_commercial_battle_results(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """每秒点击中央清理结果弹层，直到回到带冷却倒计时的快速战斗页。"""
+    deadline = time.monotonic() + COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS
+    click_count = 0
+    click_x, click_y = COMMERCIAL_BATTLE_RESULT_CLICK_POSITION
+    report(
+        "[商战结果] 开始清理连续结果弹层；"
+        f"最多等待 {COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS:g} 秒；"
+        f"关闭点击位置=({click_x}, {click_y})"
+    )
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        if _try_recognize_once(
+            tasker,
+            "商战快速战斗已完成",
+            timeout_ms=COMMERCIAL_BATTLE_RESULT_POLL_TIMEOUT_MS,
+        ):
+            capture_debug_step("商战快速战斗结果已全部关闭")
+            report(
+                "[商战结果] 已回到快速战斗阵容页；"
+                f"本轮共点击屏幕下方 {click_count} 次"
+            )
+            return
+        click_count += 1
+        wait_job(controller.post_click(click_x, click_y), "关闭商战结果弹层")
+        report(
+            f"[商战结果] 第 {click_count} 次点击屏幕下方 "
+            f"({click_x}, {click_y})，继续等待完成页"
+        )
+        time.sleep(COMMERCIAL_BATTLE_RESULT_CLICK_INTERVAL_SECONDS)
+
+    capture_debug_step("商战结果弹层清理超时")
+    raise RuntimeError(
+        f"连续点击商战结果弹层 {COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS:g} 秒后，"
+        "仍未确认回到快速战斗阵容页。"
+    )
+
+
+def complete_commercial_battle_from_home(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """登录后从主页完成一次商战快速战斗并安全返回主页。"""
+    report("[商战] 开始登录后前置商战流程")
+    enter_commercial_battle_from_home(tasker, report, cancel_event)
+    ensure_checkbox_selected(
+        tasker,
+        "商战快速战斗已勾选",
+        "勾选商战快速战斗",
+        report,
+        cancel_event,
+    )
+    report("[商战] 已确认“快速战斗”处于选中状态，点击竞争")
+    run_confirmed_transition(
+        tasker,
+        "点击商战竞争固定位置",
+        "商战快速战斗界面已打开",
+        report,
+        cancel_event,
+    )
+
+    if _try_recognize_once(
+        tasker,
+        "商战快速战斗已完成",
+        timeout_ms=COMMERCIAL_BATTLE_RESULT_POLL_TIMEOUT_MS,
+    ):
+        report("[商战] 当前阵容已在冷却中，本轮不重复发起战斗")
+    else:
+        report("[商战] 快速战斗阵容可用，点击战斗")
+        run_task(tasker, "点击商战战斗固定位置", report, cancel_event)
+        wait_for_commercial_battle_results(
+            tasker, controller, report, cancel_event
+        )
+
+    run_confirmed_transition(
+        tasker,
+        "关闭商战快速战斗固定位置",
+        "商战界面已打开",
+        report,
+        cancel_event,
+    )
+    run_confirmed_transition(
+        tasker,
+        "商战返回主页固定位置",
+        "主界面已到达",
+        report,
+        cancel_event,
+    )
+    report("[商战] 商战流程已结束并确认返回主页，继续其他日常任务")
+
+
 def run_automation(
     account: str,
     password: str,
     server_number: int = 1,
-    cultivation_level: str = DEFAULT_CULTIVATION_LEVEL,
+    cultivation_levels=None,
     device=None,
     report: Reporter = print,
     cancel_event=None,
     debug_screenshot_dir: Path | None = None,
+    continue_on_task_error: bool = False,
+    on_task_error: Callable[[str, Exception], object] | None = None,
 ) -> bool:
     global _ACTIVE_STEP_SCREENSHOT_RECORDER
     require_ocr_model()
     validate_credential(account, "账号")
     validate_credential(password, "密码")
     validate_server_number(server_number)
-    cultivation_level = validate_cultivation_level(cultivation_level)
+    if cultivation_levels is None:
+        cultivation_levels = list(DEFAULT_CULTIVATION_LEVELS)
+    cultivation_levels = validate_cultivation_levels(cultivation_levels)
     ensure_not_cancelled(cancel_event)
 
     prepare_secure_runtime()
@@ -3656,31 +4213,81 @@ def run_automation(
             capture_debug_step("失败：MaaFramework Tasker 初始化")
             raise RuntimeError("MaaFramework Tasker 初始化失败。")
 
-        run_task(tasker, "打开游戏到登录页", report, cancel_event)
-        validate_reference_canvas(controller, report)
-
-        run_task(tasker, "聚焦账号输入框", report, cancel_event)
-        replace_focused_text(device, account, "账号")
-        run_task(tasker, "账号输入已完成", report, cancel_event)
-
-        run_task(tasker, "聚焦密码输入框", report, cancel_event)
-        replace_focused_text(device, password, "密码")
-        run_task(tasker, "密码输入已完成", report, cancel_event)
-
-        ensure_checkbox_selected(
+        login_and_enter_game(
             tasker,
-            "用户协议已勾选",
-            "勾选用户协议固定位置",
+            controller,
+            device,
+            account,
+            password,
+            server_number,
             report,
             cancel_event,
         )
-        run_task(tasker, "点击登录按钮", report, cancel_event)
-        wait_for_login_result(tasker, report, cancel_event)
-        select_server(tasker, controller, server_number, report, cancel_event)
-        report(f"[选服] 已复核为 {server_number} 区，现在点击开始")
-        run_task(tasker, "点击开始按钮", report, cancel_event)
-        handle_delayed_popups(tasker, controller, report, cancel_event)
-        wait_for_main_screen(tasker, report, cancel_event)
+
+        def recover_to_home() -> None:
+            report("[任务错误继续] 正在重启游戏并重新登录当前账号，以恢复到主页")
+            if not close_game_application(device, report):
+                raise RuntimeError("业务任务出错后未能安全关闭游戏，无法继续其他任务。")
+            login_and_enter_game(
+                tasker,
+                controller,
+                device,
+                account,
+                password,
+                server_number,
+                report,
+                cancel_event,
+            )
+
+        def recover_to_daily() -> None:
+            recover_to_home()
+            run_confirmed_transition(
+                tasker,
+                "点击日常",
+                "日常界面已打开",
+                report,
+                cancel_event,
+            )
+
+        def run_business_task(
+            name: str,
+            action: Callable[[], None],
+            recovery: Callable[[], None],
+        ) -> bool:
+            try:
+                action()
+                return True
+            except AutomationCancelled:
+                raise
+            except Exception as error:
+                if not continue_on_task_error:
+                    raise
+                capture_debug_step(f"业务任务出错并跳过：{name}")
+                report(
+                    f"[任务错误继续] 业务任务“{name}”执行出错，"
+                    f"按当前模式视为已完成：{error}"
+                )
+                archive_path = on_task_error(name, error) if on_task_error else None
+                if archive_path is not None:
+                    report(f"[任务错误继续] 诊断 ZIP：{archive_path}")
+                recovery()
+                report(f"[任务错误继续] 已恢复运行环境，继续“{name}”之后的任务")
+                return False
+
+        run_business_task(
+            "商战快速战斗",
+            lambda: complete_commercial_battle_from_home(
+                tasker, controller, report, cancel_event
+            ),
+            recover_to_home,
+        )
+        store_task_completed = run_business_task(
+            "任意店铺升级10次",
+            lambda: complete_store_upgrade_from_home(
+                tasker, controller, report, cancel_event
+            ),
+            recover_to_home,
+        )
         run_confirmed_transition(
             tasker,
             "点击日常",
@@ -3689,29 +4296,101 @@ def run_automation(
             cancel_event,
         )
         daily_plan = inventory_daily_tasks(tasker, controller, report, cancel_event)
-        complete_commercial_daily_group(
-            tasker, controller, daily_plan, report, cancel_event
-        )
-        complete_artist_daily_group(
-            tasker, controller, daily_plan, report, cancel_event
+        if (
+            store_task_completed
+            and daily_plan.get("store_upgrade") == DAILY_STATE_TODO
+        ):
+            capture_debug_step("登录后店铺升级完成，但日常任务仍显示待完成")
+            store_error = RuntimeError(
+                "已从底部百货执行店铺升级，但日常盘点仍显示“任意店铺升级10次”待完成。"
+            )
+            if not continue_on_task_error:
+                raise store_error
+            report(
+                "[任务错误继续] 业务任务“任意店铺升级10次”仍显示待完成，"
+                "按当前模式视为已完成并继续"
+            )
+            if on_task_error:
+                on_task_error("任意店铺升级10次", store_error)
+        report("[日常计划] 已复核登录后直达百货的店铺升级任务")
+        commercial_task_labels = {
+            "fresh_stock": "生鲜超市进货1次",
+            "lucky_draw": "幸运扭蛋抽奖1次",
+            "club_exchange": "私人会馆商店兑换1次商品",
+        }
+        for task_key, task_label in commercial_task_labels.items():
+            isolated_plan = {
+                key: (
+                    daily_plan.get(key, DAILY_STATE_UNKNOWN)
+                    if key == task_key
+                    else DAILY_STATE_CLAIMED
+                )
+                for key in commercial_task_labels
+            }
+            run_business_task(
+                task_label,
+                lambda plan=isolated_plan: complete_commercial_daily_group(
+                    tasker, controller, plan, report, cancel_event
+                ),
+                recover_to_daily,
+            )
+        run_business_task(
+            "艺人宣传3次",
+            lambda: complete_artist_daily_group(
+                tasker, controller, daily_plan, report, cancel_event
+            ),
+            recover_to_daily,
         )
         report("[日常计划] 伙伴升级5次已停用；原实现保留但本轮不调用")
-        complete_factory_research_daily(
-            tasker, controller, daily_plan, report, cancel_event
+        run_business_task(
+            "关卡工厂研发5次",
+            lambda: complete_factory_research_daily(
+                tasker, controller, daily_plan, report, cancel_event
+            ),
+            recover_to_daily,
         )
-        complete_lady_cultivation_daily(
-            tasker,
-            controller,
-            daily_plan,
-            cultivation_level,
-            report,
-            cancel_event,
+        lady_result = {"completed": False}
+
+        def complete_lady_and_supply() -> None:
+            lady_result["completed"] = complete_lady_cultivation_daily(
+                tasker,
+                controller,
+                daily_plan,
+                cultivation_levels,
+                report,
+                cancel_event,
+            )
+            if lady_result["completed"]:
+                complete_manor_supply(tasker, controller, report, cancel_event)
+                return_to_daily(tasker, report, cancel_event)
+
+        run_business_task(
+            "名媛会培育与庄园补给",
+            complete_lady_and_supply,
+            recover_to_daily,
         )
-        if daily_plan.get("lady_cultivation") == DAILY_STATE_TODO:
-            complete_manor_supply(tasker, controller, report, cancel_event)
-            return_to_daily(tasker, report, cancel_event)
-        report("[日常计划] 商战、环球差旅、伙伴培训按本轮要求暂不执行")
-        if not claim_daily_completion_and_exit(tasker, controller, device, report, cancel_event):
+        report("[日常计划] 商战已在登录后从主页完成；环球差旅、伙伴培训暂不执行")
+        completion_result = {"completed": False}
+
+        def finish_daily() -> None:
+            completion_result["completed"] = claim_daily_completion_and_exit(
+                tasker, controller, device, report, cancel_event
+            )
+            if continue_on_task_error and not completion_result["completed"]:
+                raise RuntimeError("100 活跃礼包领取条件未确认满足，尚未完全完成。")
+
+        def close_after_final_task_error() -> None:
+            if not close_game_application(device, report):
+                raise RuntimeError("收尾任务出错后未能安全关闭游戏。")
+
+        if not run_business_task(
+            "领取日常奖励并退出游戏",
+            finish_daily,
+            close_after_final_task_error,
+        ):
+            report("当前账号的收尾任务已按错误继续模式视为完成。")
+            return True
+        if not completion_result["completed"]:
             report("已完成当前可执行日常流程；100 活跃礼包领取条件未确认满足，尚未完全完成。")
             return False
         else:
@@ -3725,7 +4404,11 @@ def run_automation(
 
 
 def main() -> None:
-    accounts = [item for item in load_account_configs() if item["active"]]
+    local_config = load_local_config()
+    accounts = [
+        item for item in load_account_configs(local_config) if item["active"]
+    ]
+    continue_on_task_error = load_continue_on_task_error(local_config)
     if accounts:
         print(f"已从本地配置读取 {len(accounts)} 个启用账号。")
     else:
@@ -3739,7 +4422,7 @@ def main() -> None:
                 "account": account,
                 "password": password,
                 "server_number": server_number,
-                "cultivation_level": DEFAULT_CULTIVATION_LEVEL,
+                "cultivation_levels": list(DEFAULT_CULTIVATION_LEVELS),
                 "active": True,
             }
         ]
@@ -3750,10 +4433,11 @@ def main() -> None:
             account_config["account"],
             account_config["password"],
             server_number=account_config["server_number"],
-            cultivation_level=account_config.get(
-                "cultivation_level", DEFAULT_CULTIVATION_LEVEL
+            cultivation_levels=account_config.get(
+                "cultivation_levels", list(DEFAULT_CULTIVATION_LEVELS)
             ),
             device=device,
+            continue_on_task_error=continue_on_task_error,
         )
         if not completed:
             print("当前账号未完全完成或游戏未安全关闭，停止后续账号。")

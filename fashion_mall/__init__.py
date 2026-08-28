@@ -7,12 +7,14 @@
 __all__ = [
     "config",
     "daily_rules",
+    "diagnostics",
     "devices",
     "maa_ops",
     "paths",
     "client_state",
     "retry",
     "self_check",
+    "store_scan",
     "ui_helpers",
     "validation",
 ]
