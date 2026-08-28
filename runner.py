@@ -176,6 +176,9 @@ CULTIVATION_ACTION_ENTRIES = {
     "高级培育": "执行高级培育",
 }
 FLOWER_ROOM_ENTRY_FIXED_ATTEMPTS = 3
+DEBUTANTE_ENTRY_RESULT_TIMEOUT_SECONDS = 5.0
+DEBUTANTE_ENTRY_POLL_TIMEOUT_MS = 250
+DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS = 0.05
 MANOR_SUPPLY_ENTRY_OCR_ATTEMPTS = 12
 MANOR_SUPPLY_ENTRY_OCR_TIMEOUT_MS = 500
 MANOR_SUPPLY_ENTRY_POLL_INTERVAL_SECONDS = 0.15
@@ -3329,19 +3332,54 @@ def complete_partner_daily_group(
 
 def enter_debutante_club_from_main(
     tasker: Tasker,
+    controller: AdbController,
     report: Reporter = print,
     cancel_event=None,
-) -> None:
-    """使用校准固定位置进入名媛会，避开装饰字和引导手指对 OCR 的干扰。"""
+) -> bool:
+    """进入名媛会；账号未加入时关闭提示并返回 False。"""
     report("[名媛会入口] 使用校准固定位置 (365, 680) 进入名媛会")
-    run_confirmed_transition(
-        tasker,
-        "点击主页名媛会入口固定位置",
-        "名媛会界面已打开",
-        report,
-        cancel_event,
+    run_task(tasker, "点击主页名媛会入口固定位置", report, cancel_event)
+    deadline = time.monotonic() + DEBUTANTE_ENTRY_RESULT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        if _try_recognize_once(
+            tasker,
+            "名媛会未加入提示",
+            timeout_ms=DEBUTANTE_ENTRY_POLL_TIMEOUT_MS,
+        ):
+            capture_debug_step("识别到账号未加入名媛会")
+            report(
+                "[名媛会入口] 识别到“您还未加入名媛会，请选择”，"
+                "本账号跳过名媛会相关流程"
+            )
+            wait_job(
+                controller.post_shell("input keyevent 4"),
+                "关闭未加入名媛会提示",
+            )
+            if not _transition_confirmed(
+                tasker,
+                "主界面已到达",
+                report,
+                cancel_event,
+            ):
+                raise RuntimeError(
+                    "已识别账号未加入名媛会，但关闭提示后未能确认返回主页。"
+                )
+            report("[名媛会入口] 未加入提示已关闭，已确认返回主页")
+            return False
+        if _try_recognize_once(
+            tasker,
+            "名媛会界面已打开",
+            timeout_ms=DEBUTANTE_ENTRY_POLL_TIMEOUT_MS,
+        ):
+            report("[名媛会入口] 已确认通过固定位置进入名媛会")
+            return True
+        time.sleep(DEBUTANTE_ENTRY_POLL_INTERVAL_SECONDS)
+
+    capture_debug_step("名媛会入口结果未识别")
+    raise RuntimeError(
+        "点击名媛会入口后，既未确认进入名媛会，也未识别到未加入提示。"
     )
-    report("[名媛会入口] 已确认通过固定位置进入名媛会")
 
 
 def enter_flower_room_from_debutante_club(
@@ -3408,14 +3446,14 @@ def complete_lady_cultivation_daily(
     cultivation_levels,
     report: Reporter = print,
     cancel_event=None,
-) -> None:
+) -> bool:
     cultivation_levels = validate_cultivation_levels(cultivation_levels)
     if daily_plan.get("lady_cultivation") != DAILY_STATE_TODO:
         report(
             "[日常计划] 跳过名媛会培育1次："
             f"状态={daily_plan.get('lady_cultivation', DAILY_STATE_UNKNOWN)}"
         )
-        return
+        return False
 
     level_summary = "、".join(cultivation_levels)
     report(
@@ -3430,7 +3468,12 @@ def complete_lady_cultivation_daily(
         report,
         cancel_event,
     )
-    enter_debutante_club_from_main(tasker, report, cancel_event)
+    if not enter_debutante_club_from_main(
+        tasker, controller, report, cancel_event
+    ):
+        return_to_daily(tasker, report, cancel_event)
+        report("[日常计划] 已跳过名媛会培育和庄园补给，并返回日常页")
+        return False
     enter_flower_room_from_debutante_club(tasker, report, cancel_event)
     for index, cultivation_level in enumerate(cultivation_levels, start=1):
         action_entry = CULTIVATION_ACTION_ENTRIES[cultivation_level]
@@ -3455,6 +3498,7 @@ def complete_lady_cultivation_daily(
         cancel_event,
     )
     report(f"[日常计划] 已执行名媛会培育：{level_summary}")
+    return True
 
 
 def enter_manor_supply_from_debutante_club(
@@ -4029,7 +4073,7 @@ def run_automation(
         complete_factory_research_daily(
             tasker, controller, daily_plan, report, cancel_event
         )
-        complete_lady_cultivation_daily(
+        lady_cultivation_completed = complete_lady_cultivation_daily(
             tasker,
             controller,
             daily_plan,
@@ -4037,7 +4081,7 @@ def run_automation(
             report,
             cancel_event,
         )
-        if daily_plan.get("lady_cultivation") == DAILY_STATE_TODO:
+        if lady_cultivation_completed:
             complete_manor_supply(tasker, controller, report, cancel_event)
             return_to_daily(tasker, report, cancel_event)
         report("[日常计划] 商战、环球差旅、伙伴培训按本轮要求暂不执行")

@@ -1112,6 +1112,13 @@
         "action": "DoNothing",
         "timeout": 10000
     },
+    "名媛会未加入提示": {
+        "recognition": "OCR",
+        "expected": "未加入名媛会",
+        "roi": [100, 880, 560, 260],
+        "action": "DoNothing",
+        "timeout": 3000
+    },
     "点击花房培育": {
         "recognition": "OCR",
         "expected": "花房培育",
