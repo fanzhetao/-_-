@@ -159,6 +159,11 @@ GAME_ENTRY_READY_ENTRIES = (
     "任意活动稍后再去弹窗",
     "商战冠军点击任意处弹窗",
 )
+COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS = 2
+COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS = 120.0
+COMMERCIAL_BATTLE_RESULT_POLL_TIMEOUT_MS = 250
+COMMERCIAL_BATTLE_RESULT_CLICK_INTERVAL_SECONDS = 1.0
+COMMERCIAL_BATTLE_RESULT_CLICK_POSITION = (360, 1120)
 LUCKY_DRAW_RESULT_TIMEOUT_SECONDS = 20.0
 ARTIST_PROMOTION_RESULT_TIMEOUT_SECONDS = 5.0
 PARTNER_CANDIDATE_ENTRIES = (
@@ -3976,6 +3981,152 @@ def replace_focused_text(device, value: str, label: str) -> None:
     run_adb_shell_from_stdin(device, f"input text {escaped_value}", f"输入{label}")
 
 
+def enter_commercial_battle_from_home(
+    tasker: Tasker,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """从主页进入商战；文字入口优先，固定坐标兜底。"""
+    report("[商战入口] 从主页查找“商战”文字")
+    if _try_execute_once(
+        tasker,
+        "点击主页商战入口",
+        timeout_ms=DAILY_DESTINATION_TIMEOUT_MS,
+    ):
+        report("[商战入口] 已按 OCR 文字位置点击")
+        if _transition_confirmed(
+            tasker,
+            "商战界面已打开",
+            report,
+            cancel_event,
+        ):
+            report("[商战入口] 已确认进入商战页面")
+            return
+        report("[商战入口] OCR 点击后未确认目标页，改用固定位置")
+    else:
+        report("[商战入口] 未识别到入口文字，使用固定位置 (180, 850)")
+
+    for attempt in range(1, COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS + 1):
+        ensure_not_cancelled(cancel_event)
+        run_task(tasker, "点击主页商战入口固定位置", report, cancel_event)
+        if _transition_confirmed(
+            tasker,
+            "商战界面已打开",
+            report,
+            cancel_event,
+        ):
+            report(
+                "[商战入口] 固定位置进入成功"
+                f"（{attempt}/{COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS}）"
+            )
+            return
+        report(
+            "[商战入口] 固定位置点击后未确认目标页，准备重试"
+            f"（{attempt}/{COMMERCIAL_BATTLE_ENTRY_FIXED_ATTEMPTS}）"
+        )
+
+    capture_debug_step("主页商战入口连续点击后仍未进入")
+    raise RuntimeError("从主页点击商战入口后，未能确认进入商战页面。")
+
+
+def wait_for_commercial_battle_results(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """每秒点击中央清理结果弹层，直到回到带冷却倒计时的快速战斗页。"""
+    deadline = time.monotonic() + COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS
+    click_count = 0
+    click_x, click_y = COMMERCIAL_BATTLE_RESULT_CLICK_POSITION
+    report(
+        "[商战结果] 开始清理连续结果弹层；"
+        f"最多等待 {COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS:g} 秒；"
+        f"关闭点击位置=({click_x}, {click_y})"
+    )
+    while time.monotonic() < deadline:
+        ensure_not_cancelled(cancel_event)
+        if _try_recognize_once(
+            tasker,
+            "商战快速战斗已完成",
+            timeout_ms=COMMERCIAL_BATTLE_RESULT_POLL_TIMEOUT_MS,
+        ):
+            capture_debug_step("商战快速战斗结果已全部关闭")
+            report(
+                "[商战结果] 已回到快速战斗阵容页；"
+                f"本轮共点击屏幕下方 {click_count} 次"
+            )
+            return
+        click_count += 1
+        wait_job(controller.post_click(click_x, click_y), "关闭商战结果弹层")
+        report(
+            f"[商战结果] 第 {click_count} 次点击屏幕下方 "
+            f"({click_x}, {click_y})，继续等待完成页"
+        )
+        time.sleep(COMMERCIAL_BATTLE_RESULT_CLICK_INTERVAL_SECONDS)
+
+    capture_debug_step("商战结果弹层清理超时")
+    raise RuntimeError(
+        f"连续点击商战结果弹层 {COMMERCIAL_BATTLE_RESULT_TIMEOUT_SECONDS:g} 秒后，"
+        "仍未确认回到快速战斗阵容页。"
+    )
+
+
+def complete_commercial_battle_from_home(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+) -> None:
+    """登录后从主页完成一次商战快速战斗并安全返回主页。"""
+    report("[商战] 开始登录后前置商战流程")
+    enter_commercial_battle_from_home(tasker, report, cancel_event)
+    ensure_checkbox_selected(
+        tasker,
+        "商战快速战斗已勾选",
+        "勾选商战快速战斗",
+        report,
+        cancel_event,
+    )
+    report("[商战] 已确认“快速战斗”处于选中状态，点击竞争")
+    run_confirmed_transition(
+        tasker,
+        "点击商战竞争固定位置",
+        "商战快速战斗界面已打开",
+        report,
+        cancel_event,
+    )
+
+    if _try_recognize_once(
+        tasker,
+        "商战快速战斗已完成",
+        timeout_ms=COMMERCIAL_BATTLE_RESULT_POLL_TIMEOUT_MS,
+    ):
+        report("[商战] 当前阵容已在冷却中，本轮不重复发起战斗")
+    else:
+        report("[商战] 快速战斗阵容可用，点击战斗")
+        run_task(tasker, "点击商战战斗固定位置", report, cancel_event)
+        wait_for_commercial_battle_results(
+            tasker, controller, report, cancel_event
+        )
+
+    run_confirmed_transition(
+        tasker,
+        "关闭商战快速战斗固定位置",
+        "商战界面已打开",
+        report,
+        cancel_event,
+    )
+    run_confirmed_transition(
+        tasker,
+        "商战返回主页固定位置",
+        "主界面已到达",
+        report,
+        cancel_event,
+    )
+    report("[商战] 商战流程已结束并确认返回主页，继续其他日常任务")
+
+
 def run_automation(
     account: str,
     password: str,
@@ -4048,6 +4199,9 @@ def run_automation(
             report,
             cancel_event,
         )
+        complete_commercial_battle_from_home(
+            tasker, controller, report, cancel_event
+        )
         complete_store_upgrade_from_home(tasker, controller, report, cancel_event)
         run_confirmed_transition(
             tasker,
@@ -4084,7 +4238,7 @@ def run_automation(
         if lady_cultivation_completed:
             complete_manor_supply(tasker, controller, report, cancel_event)
             return_to_daily(tasker, report, cancel_event)
-        report("[日常计划] 商战、环球差旅、伙伴培训按本轮要求暂不执行")
+        report("[日常计划] 商战已在登录后从主页完成；环球差旅、伙伴培训暂不执行")
         if not claim_daily_completion_and_exit(tasker, controller, device, report, cancel_event):
             report("已完成当前可执行日常流程；100 活跃礼包领取条件未确认满足，尚未完全完成。")
             return False

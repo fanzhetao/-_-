@@ -1102,6 +1102,89 @@
         "action": "Click",
         "post_delay": 1000
     },
+    "点击主页商战入口": {
+        "recognition": "OCR",
+        "expected": "^商战$",
+        "roi": [120, 720, 220, 300],
+        "action": "Click",
+        "post_delay": 1200
+    },
+    "点击主页商战入口固定位置": {
+        "recognition": "DirectHit",
+        "target": [180, 850],
+        "action": "Click",
+        "post_delay": 1200
+    },
+    "商战界面已打开": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "区域代表|我的排名", "roi": [160, 120, 400, 240]},
+            {"recognition": "OCR", "expected": "^竞争$", "roi": [230, 900, 260, 260]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "商战快速战斗已勾选": {
+        "recognition": "ColorMatch",
+        "roi": [302, 1157, 11, 11],
+        "method": 4,
+        "lower": [90, 160, 85],
+        "upper": [165, 255, 165],
+        "count": 10,
+        "action": "DoNothing"
+    },
+    "勾选商战快速战斗": {
+        "recognition": "DirectHit",
+        "target": [307, 1162],
+        "action": "Click",
+        "post_delay": 800
+    },
+    "点击商战竞争固定位置": {
+        "recognition": "DirectHit",
+        "target": [360, 1050],
+        "action": "Click",
+        "post_delay": 1200
+    },
+    "商战快速战斗界面已打开": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "^快速战斗$", "roi": [180, 130, 360, 150]},
+            {"recognition": "OCR", "expected": "一键上阵", "roi": [70, 980, 260, 180]},
+            {"recognition": "OCR", "expected": "^战斗$", "roi": [360, 980, 260, 180]}
+        ],
+        "box_index": 0,
+        "action": "DoNothing",
+        "timeout": 10000
+    },
+    "点击商战战斗固定位置": {
+        "recognition": "DirectHit",
+        "target": [500, 1045],
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "商战快速战斗已完成": {
+        "recognition": "And",
+        "all_of": [
+            {"recognition": "OCR", "expected": "^快速战斗$", "roi": [180, 130, 360, 150]},
+            {"recognition": "OCR", "expected": "[0-9]{2}:[0-9]{2}:[0-9]{2}", "roi": [60, 390, 600, 540]},
+            {"recognition": "ColorMatch", "roi": [80, 150, 560, 120], "method": 4, "lower": [180, 180, 180], "upper": [255, 255, 255], "count": 20000}
+        ],
+        "box_index": 0,
+        "action": "DoNothing"
+    },
+    "关闭商战快速战斗固定位置": {
+        "recognition": "DirectHit",
+        "target": [650, 175],
+        "action": "Click",
+        "post_delay": 800
+    },
+    "商战返回主页固定位置": {
+        "recognition": "DirectHit",
+        "target": [45, 1230],
+        "action": "Click",
+        "post_delay": 1000
+    },
     "名媛会界面已打开": {
         "recognition": "And",
         "all_of": [
