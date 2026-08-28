@@ -14,16 +14,16 @@ def active_accounts(accounts: Iterable[Mapping[str, object]]) -> list[Mapping[st
 def require_active_accounts(accounts: Iterable[Mapping[str, object]]) -> list[Mapping[str, object]]:
     selected = active_accounts(accounts)
     if not selected:
-        raise RuntimeError("请至少勾选一个要使用的账号。")
+        raise RuntimeError("请至少启用一个账号。")
     return selected
 
 
 def progress_message(index: int, total: int, server_number: object) -> str:
-    return f"[账号队列] 开始执行第 {index}/{total} 个账号（{server_number} 区）"
+    return f"[账号队列] 第 {index}/{total} 个账号开始运行（目标区服：{server_number} 区）"
 
 
 def incomplete_message(index: int, total: int) -> str:
     return (
-        f"第 {index}/{total} 个账号未能完成“领取 100 活跃礼包并关闭游戏”的完整条件，"
+        f"第 {index}/{total} 个账号未完全完成“领取 100 活跃礼包并关闭游戏”，"
         "账号队列已停止。"
     )

@@ -65,11 +65,11 @@ def archive_recent_steps(
         if matching_lines:
             recent_lines.append(matching_lines[-1])
     diagnostic_lines = [
-        "时尚百货城自动化错误诊断包",
+        "时尚百货城自动化客户端错误诊断包",
         f"账号：{account_name}",
         f"账号序号：{account_index}",
-        f"错误：{error_message}",
-        f"已打包最近操作截图：{len(screenshots)} 张",
+        f"错误摘要：{error_message}",
+        f"已保存最近操作截图：{len(screenshots)} 张",
         "",
         *recent_lines,
     ]

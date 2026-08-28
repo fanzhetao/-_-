@@ -15,7 +15,7 @@ def distribution_self_check(version_path: Path, ocr_dir: Path) -> None:
 
     version = version_path.read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        raise RuntimeError("VERSION 必须使用 X.Y.Z 格式。")
+        raise RuntimeError("版本号必须使用 X.Y.Z 格式。")
     missing = [
         name for name in ("det.onnx", "rec.onnx", "keys.txt")
         if not (ocr_dir / name).is_file()
@@ -24,10 +24,10 @@ def distribution_self_check(version_path: Path, ocr_dir: Path) -> None:
         names = ", ".join(missing)
         raise RuntimeError(
             f"缺少 OCR 模型文件：{names}\n"
-            f"请将 MaaCommonAssets 的中文 OCR 模型放入：{ocr_dir}"
+            f"请将 MaaCommonAssets 的中文 OCR 模型放入：{ocr_dir} 后重试。"
         )
 
     from maa.library import Library
 
     if not Library.version():
-        raise RuntimeError("无法读取 MaaFramework 版本。")
+        raise RuntimeError("无法读取 MaaFramework 版本，请检查发布包内容。")

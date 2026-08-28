@@ -118,7 +118,7 @@ def load_accounts(
 
 
 def load_continue_on_process_error(config: dict) -> bool:
-    """读取进程错误后关闭游戏并继续下一账号的全局模式。"""
+    """读取账号运行错误后关闭游戏并继续下一账号的选项。"""
 
     return bool(config.get("continue_on_process_error", False))
 
@@ -130,7 +130,7 @@ def load_package_error_diagnostics(config: dict) -> bool:
 
 
 def load_continue_on_task_error(config: dict) -> bool:
-    """读取业务任务出错后视为完成并继续的运行模式。"""
+    """读取单项任务出错后跳过并继续的运行选项。"""
 
     return bool(config.get("continue_on_task_error", False))
 

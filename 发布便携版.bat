@@ -5,9 +5,9 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\buil
 set "RELEASE_EXIT_CODE=%errorlevel%"
 echo.
 if not "%RELEASE_EXIT_CODE%"=="0" (
-    echo Release failed. See the error details above.
+    echo 发布失败，请查看上方错误信息。
 ) else (
-    echo Release succeeded. Artifacts are in the release directory.
+    echo 发布成功，产物已保存到 release 目录。
 )
 pause
 exit /b %RELEASE_EXIT_CODE%
