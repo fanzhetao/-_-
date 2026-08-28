@@ -1749,18 +1749,31 @@ def drain_visible_daily_rewards(
     report: Reporter = print,
     cancel_event=None,
 ) -> int:
+    """领取当前视口奖励，避免每个空动作都重复执行整套弹窗巡检。"""
     claimed = 0
     for _ in range(30):
         ensure_not_cancelled(cancel_event)
-        if try_execute(tasker, "日常奖励确定", report, cancel_event):
+        if _try_execute_once(tasker, "日常奖励确定", POPUP_POLL_TIMEOUT_MS):
             report("[日常] 点击奖励确定")
             time.sleep(0.2)
             continue
-        if not try_execute(tasker, "日常领取按钮", report, cancel_event):
-            break
-        claimed += 1
-        report(f"[日常] 已领取 {claimed} 项当前可见奖励")
-        time.sleep(0.25)
+        if _try_execute_once(tasker, "日常领取按钮", POPUP_POLL_TIMEOUT_MS):
+            claimed += 1
+            report(f"[日常] 已领取 {claimed} 项当前可见奖励")
+            time.sleep(0.25)
+            continue
+
+        # 两个奖励动作都不存在时只巡检一次中断弹窗；若确实清除了弹窗，
+        # 回到循环重新识别奖励，否则当前视口已经排空。
+        if handle_interrupting_popups(
+            tasker,
+            report,
+            cancel_event,
+            detection_timeout_ms=POPUP_POLL_TIMEOUT_MS,
+        ):
+            report("[弹窗恢复] 已清除奖励扫描期间的中断弹窗")
+            continue
+        break
     return claimed
 
 
