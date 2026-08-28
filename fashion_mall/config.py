@@ -129,6 +129,12 @@ def load_package_error_diagnostics(config: dict) -> bool:
     return bool(config.get("package_error_diagnostics", True))
 
 
+def load_continue_on_task_error(config: dict) -> bool:
+    """读取业务任务出错后视为完成并继续的运行模式。"""
+
+    return bool(config.get("continue_on_task_error", False))
+
+
 def normalize_accounts_for_save(
     accounts: Iterable[dict],
     *,
@@ -175,6 +181,7 @@ def write_accounts(
     validate_levels: Callable[[object], list[str]],
     continue_on_process_error: bool = False,
     package_error_diagnostics: bool = True,
+    continue_on_task_error: bool = False,
 ) -> None:
     """以临时文件替换方式写入账号配置，避免留下半截 JSON。"""
 
@@ -190,6 +197,7 @@ def write_accounts(
         "accounts": normalized_accounts,
         "continue_on_process_error": bool(continue_on_process_error),
         "package_error_diagnostics": bool(package_error_diagnostics),
+        "continue_on_task_error": bool(continue_on_task_error),
     }
     temp_path = path.with_suffix(".tmp")
     temp_path.write_text(

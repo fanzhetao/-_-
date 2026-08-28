@@ -396,11 +396,19 @@ def load_package_error_diagnostics(config: dict | None = None) -> bool:
     return config_store.load_package_error_diagnostics(config)
 
 
+def load_continue_on_task_error(config: dict | None = None) -> bool:
+    """读取业务任务出错后视为完成并继续的运行模式。"""
+    if config is None:
+        config = load_local_config()
+    return config_store.load_continue_on_task_error(config)
+
+
 def save_account_configs(
     accounts: list[dict],
     *,
     continue_on_process_error: bool = False,
     package_error_diagnostics: bool = True,
+    continue_on_task_error: bool = False,
 ) -> None:
     """原子保存账号队列；每个账号保留独立的启用状态。"""
     config_store.write_accounts(
@@ -412,6 +420,7 @@ def save_account_configs(
         validate_levels=validate_cultivation_levels,
         continue_on_process_error=continue_on_process_error,
         package_error_diagnostics=package_error_diagnostics,
+        continue_on_task_error=continue_on_task_error,
     )
 
 
@@ -4149,6 +4158,8 @@ def run_automation(
     report: Reporter = print,
     cancel_event=None,
     debug_screenshot_dir: Path | None = None,
+    continue_on_task_error: bool = False,
+    on_task_error: Callable[[str, Exception], object] | None = None,
 ) -> bool:
     global _ACTIVE_STEP_SCREENSHOT_RECORDER
     require_ocr_model()
@@ -4212,10 +4223,71 @@ def run_automation(
             report,
             cancel_event,
         )
-        complete_commercial_battle_from_home(
-            tasker, controller, report, cancel_event
+
+        def recover_to_home() -> None:
+            report("[任务错误继续] 正在重启游戏并重新登录当前账号，以恢复到主页")
+            if not close_game_application(device, report):
+                raise RuntimeError("业务任务出错后未能安全关闭游戏，无法继续其他任务。")
+            login_and_enter_game(
+                tasker,
+                controller,
+                device,
+                account,
+                password,
+                server_number,
+                report,
+                cancel_event,
+            )
+
+        def recover_to_daily() -> None:
+            recover_to_home()
+            run_confirmed_transition(
+                tasker,
+                "点击日常",
+                "日常界面已打开",
+                report,
+                cancel_event,
+            )
+
+        def run_business_task(
+            name: str,
+            action: Callable[[], None],
+            recovery: Callable[[], None],
+        ) -> bool:
+            try:
+                action()
+                return True
+            except AutomationCancelled:
+                raise
+            except Exception as error:
+                if not continue_on_task_error:
+                    raise
+                capture_debug_step(f"业务任务出错并跳过：{name}")
+                report(
+                    f"[任务错误继续] 业务任务“{name}”执行出错，"
+                    f"按当前模式视为已完成：{error}"
+                )
+                archive_path = on_task_error(name, error) if on_task_error else None
+                if archive_path is not None:
+                    report(f"[任务错误继续] 诊断 ZIP：{archive_path}")
+                recovery()
+                report(f"[任务错误继续] 已恢复运行环境，继续“{name}”之后的任务")
+                return False
+
+        run_business_task(
+            "商战快速战斗",
+            lambda: complete_commercial_battle_from_home(
+                tasker, controller, report, cancel_event
+            ),
+            recover_to_home,
         )
-        complete_store_upgrade_from_home(tasker, controller, report, cancel_event)
+        store_task_completed = run_business_task(
+            "任意店铺升级10次",
+            lambda: complete_store_upgrade_from_home(
+                tasker, controller, report, cancel_event
+            ),
+            recover_to_home,
+        )
         run_confirmed_transition(
             tasker,
             "点击日常",
@@ -4224,35 +4296,101 @@ def run_automation(
             cancel_event,
         )
         daily_plan = inventory_daily_tasks(tasker, controller, report, cancel_event)
-        if daily_plan.get("store_upgrade") == DAILY_STATE_TODO:
+        if (
+            store_task_completed
+            and daily_plan.get("store_upgrade") == DAILY_STATE_TODO
+        ):
             capture_debug_step("登录后店铺升级完成，但日常任务仍显示待完成")
-            raise RuntimeError(
+            store_error = RuntimeError(
                 "已从底部百货执行店铺升级，但日常盘点仍显示“任意店铺升级10次”待完成。"
             )
+            if not continue_on_task_error:
+                raise store_error
+            report(
+                "[任务错误继续] 业务任务“任意店铺升级10次”仍显示待完成，"
+                "按当前模式视为已完成并继续"
+            )
+            if on_task_error:
+                on_task_error("任意店铺升级10次", store_error)
         report("[日常计划] 已复核登录后直达百货的店铺升级任务")
-        complete_commercial_daily_group(
-            tasker, controller, daily_plan, report, cancel_event
-        )
-        complete_artist_daily_group(
-            tasker, controller, daily_plan, report, cancel_event
+        commercial_task_labels = {
+            "fresh_stock": "生鲜超市进货1次",
+            "lucky_draw": "幸运扭蛋抽奖1次",
+            "club_exchange": "私人会馆商店兑换1次商品",
+        }
+        for task_key, task_label in commercial_task_labels.items():
+            isolated_plan = {
+                key: (
+                    daily_plan.get(key, DAILY_STATE_UNKNOWN)
+                    if key == task_key
+                    else DAILY_STATE_CLAIMED
+                )
+                for key in commercial_task_labels
+            }
+            run_business_task(
+                task_label,
+                lambda plan=isolated_plan: complete_commercial_daily_group(
+                    tasker, controller, plan, report, cancel_event
+                ),
+                recover_to_daily,
+            )
+        run_business_task(
+            "艺人宣传3次",
+            lambda: complete_artist_daily_group(
+                tasker, controller, daily_plan, report, cancel_event
+            ),
+            recover_to_daily,
         )
         report("[日常计划] 伙伴升级5次已停用；原实现保留但本轮不调用")
-        complete_factory_research_daily(
-            tasker, controller, daily_plan, report, cancel_event
+        run_business_task(
+            "关卡工厂研发5次",
+            lambda: complete_factory_research_daily(
+                tasker, controller, daily_plan, report, cancel_event
+            ),
+            recover_to_daily,
         )
-        lady_cultivation_completed = complete_lady_cultivation_daily(
-            tasker,
-            controller,
-            daily_plan,
-            cultivation_levels,
-            report,
-            cancel_event,
+        lady_result = {"completed": False}
+
+        def complete_lady_and_supply() -> None:
+            lady_result["completed"] = complete_lady_cultivation_daily(
+                tasker,
+                controller,
+                daily_plan,
+                cultivation_levels,
+                report,
+                cancel_event,
+            )
+            if lady_result["completed"]:
+                complete_manor_supply(tasker, controller, report, cancel_event)
+                return_to_daily(tasker, report, cancel_event)
+
+        run_business_task(
+            "名媛会培育与庄园补给",
+            complete_lady_and_supply,
+            recover_to_daily,
         )
-        if lady_cultivation_completed:
-            complete_manor_supply(tasker, controller, report, cancel_event)
-            return_to_daily(tasker, report, cancel_event)
         report("[日常计划] 商战已在登录后从主页完成；环球差旅、伙伴培训暂不执行")
-        if not claim_daily_completion_and_exit(tasker, controller, device, report, cancel_event):
+        completion_result = {"completed": False}
+
+        def finish_daily() -> None:
+            completion_result["completed"] = claim_daily_completion_and_exit(
+                tasker, controller, device, report, cancel_event
+            )
+            if continue_on_task_error and not completion_result["completed"]:
+                raise RuntimeError("100 活跃礼包领取条件未确认满足，尚未完全完成。")
+
+        def close_after_final_task_error() -> None:
+            if not close_game_application(device, report):
+                raise RuntimeError("收尾任务出错后未能安全关闭游戏。")
+
+        if not run_business_task(
+            "领取日常奖励并退出游戏",
+            finish_daily,
+            close_after_final_task_error,
+        ):
+            report("当前账号的收尾任务已按错误继续模式视为完成。")
+            return True
+        if not completion_result["completed"]:
             report("已完成当前可执行日常流程；100 活跃礼包领取条件未确认满足，尚未完全完成。")
             return False
         else:
@@ -4266,7 +4404,11 @@ def run_automation(
 
 
 def main() -> None:
-    accounts = [item for item in load_account_configs() if item["active"]]
+    local_config = load_local_config()
+    accounts = [
+        item for item in load_account_configs(local_config) if item["active"]
+    ]
+    continue_on_task_error = load_continue_on_task_error(local_config)
     if accounts:
         print(f"已从本地配置读取 {len(accounts)} 个启用账号。")
     else:
@@ -4295,6 +4437,7 @@ def main() -> None:
                 "cultivation_levels", list(DEFAULT_CULTIVATION_LEVELS)
             ),
             device=device,
+            continue_on_task_error=continue_on_task_error,
         )
         if not completed:
             print("当前账号未完全完成或游戏未安全关闭，停止后续账号。")

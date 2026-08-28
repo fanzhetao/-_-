@@ -95,6 +95,9 @@ class FashionMallClient:
         self.package_error_diagnostics = tk.BooleanVar(
             value=runner.load_package_error_diagnostics(local_config)
         )
+        self.continue_on_task_error = tk.BooleanVar(
+            value=runner.load_continue_on_task_error(local_config)
+        )
         self.status = tk.StringVar(value="就绪")
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.cancel_event: threading.Event | None = None
@@ -255,8 +258,18 @@ class FashionMallClient:
             variable=self.package_error_diagnostics,
         )
         self.error_diagnostic_button.grid(row=1, column=0, sticky="w")
+        self.task_error_mode_button = ttk.Checkbutton(
+            mode_frame,
+            text="业务任务出错时视为完成并继续（始终生成 ZIP）",
+            variable=self.continue_on_task_error,
+        )
+        self.task_error_mode_button.grid(row=2, column=0, sticky="w")
         self.account_widgets.extend(
-            (self.process_error_mode_button, self.error_diagnostic_button)
+            (
+                self.process_error_mode_button,
+                self.error_diagnostic_button,
+                self.task_error_mode_button,
+            )
         )
 
         controls = ttk.Frame(outer)
@@ -618,6 +631,7 @@ class FashionMallClient:
                 accounts,
                 continue_on_process_error=bool(self.continue_on_process_error.get()),
                 package_error_diagnostics=bool(self.package_error_diagnostics.get()),
+                continue_on_task_error=bool(self.continue_on_task_error.get()),
             )
         except (OSError, RuntimeError, ValueError) as error:
             messagebox.showerror("保存失败", f"无法写入本地配置：{error}", parent=self.root)
@@ -626,6 +640,7 @@ class FashionMallClient:
         active_accounts = client_state.require_active_accounts(accounts)
         continue_on_process_error = bool(self.continue_on_process_error.get())
         package_error_diagnostics = bool(self.package_error_diagnostics.get())
+        continue_on_task_error = bool(self.continue_on_task_error.get())
         self.cancel_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
@@ -642,6 +657,7 @@ class FashionMallClient:
                 self.cancel_event,
                 continue_on_process_error,
                 package_error_diagnostics,
+                continue_on_task_error,
             ),
             daemon=True,
         )
@@ -664,10 +680,15 @@ class FashionMallClient:
         self.account_rows.clear()
         self.account_widgets = self.account_widgets[:2]
         self.account_widgets.extend(
-            (self.process_error_mode_button, self.error_diagnostic_button)
+            (
+                self.process_error_mode_button,
+                self.error_diagnostic_button,
+                self.task_error_mode_button,
+            )
         )
         self.continue_on_process_error.set(False)
         self.package_error_diagnostics.set(True)
+        self.continue_on_task_error.set(False)
         self._add_account_row()
         self._append_log("本地账号配置已删除。")
 
@@ -677,14 +698,15 @@ class FashionMallClient:
         cancel_event: threading.Event,
         continue_on_process_error: bool = False,
         package_error_diagnostics: bool = True,
+        continue_on_task_error: bool = False,
     ) -> None:
         diagnostic_context = None
         diagnostic_attempted = False
 
-        def package_current_error(error_message: str):
+        def package_current_error(error_message: str, *, force: bool = False):
             nonlocal diagnostic_attempted
             diagnostic_attempted = True
-            if not package_error_diagnostics or diagnostic_context is None:
+            if (not package_error_diagnostics and not force) or diagnostic_context is None:
                 return None
             account_config, account_index, account_screenshot_dir = diagnostic_context
             try:
@@ -707,6 +729,7 @@ class FashionMallClient:
         try:
             total = len(accounts)
             recovered_error_count = 0
+            recovered_task_error_count = 0
             for index, account_config in enumerate(accounts, start=1):
                 account_screenshot_dir = self.debug_screenshot_dir / f"account-{index}"
                 diagnostic_context = (
@@ -722,6 +745,14 @@ class FashionMallClient:
                     )
                 )
                 try:
+                    def handle_task_error(task_name: str, error: Exception):
+                        nonlocal recovered_task_error_count
+                        recovered_task_error_count += 1
+                        return package_current_error(
+                            f"业务任务“{task_name}”已跳过：{error}",
+                            force=True,
+                        )
+
                     completed = runner.run_automation(
                         account_config["account"],
                         account_config["password"],
@@ -733,6 +764,8 @@ class FashionMallClient:
                         report=self._report,
                         cancel_event=cancel_event,
                         debug_screenshot_dir=account_screenshot_dir,
+                        continue_on_task_error=continue_on_task_error,
+                        on_task_error=handle_task_error,
                     )
                 except runner.AutomationCancelled:
                     raise
@@ -776,14 +809,21 @@ class FashionMallClient:
                 error_message += f"\n报错诊断包：{archive_path}"
             self._emit("error", error_message)
         else:
-            if recovered_error_count:
+            if recovered_error_count or recovered_task_error_count:
                 diagnostic_summary = (
-                    "并已生成诊断包。" if package_error_diagnostics else "。"
+                    "并已生成诊断包。"
+                    if package_error_diagnostics or recovered_task_error_count
+                    else "。"
                 )
+                details = []
+                if recovered_error_count:
+                    details.append(f"{recovered_error_count} 个账号发生进程错误")
+                if recovered_task_error_count:
+                    details.append(f"{recovered_task_error_count} 个业务任务出错后已跳过")
                 self._emit(
                     "done_with_errors",
                     f"账号队列已结束，共处理 {len(accounts)} 个账号；"
-                    f"其中 {recovered_error_count} 个账号发生进程错误"
+                    f"其中 {'，'.join(details)}"
                     f"{diagnostic_summary}",
                 )
             else:
