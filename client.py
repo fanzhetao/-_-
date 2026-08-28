@@ -19,7 +19,11 @@ if "--self-check" in sys.argv:
 from fashion_mall import client_state
 from fashion_mall.diagnostics import archive_recent_steps
 from fashion_mall.paths import resolve_paths
-from fashion_mall.ui_helpers import calculate_ui_scale, move_list_item
+from fashion_mall.ui_helpers import (
+    calculate_ui_scale,
+    drag_insertion_index,
+    move_list_item,
+)
 
 
 _PATHS = resolve_paths(__file__, sys)
@@ -80,6 +84,8 @@ class FashionMallClient:
         self.account_rows: list[dict] = []
         self.account_widgets: list[tk.Widget] = []
         self.dragged_account_row: dict | None = None
+        self.account_drag_start_y = 0
+        self.account_drag_active = False
         self.account_drag_changed = False
         self.account_drag_enabled = True
         self.show_password = tk.BooleanVar(value=False)
@@ -122,7 +128,28 @@ class FashionMallClient:
         # 即使 Windows 缩放被手动设为 100%，高分屏也不会显示成一个很小的窗口。
         scale = calculate_ui_scale(screen_width, screen_height, dpi)
         self.root.tk.call("tk", "scaling", (96.0 / 72.0) * scale)
-        ttk.Style(self.root).configure(".", font=("Microsoft YaHei UI", 9))
+        style = ttk.Style(self.root)
+        style.configure(".", font=("Microsoft YaHei UI", 9))
+        drag_border_width = max(1, round(2 * scale))
+        style.configure(
+            "AccountRow.TFrame",
+            borderwidth=drag_border_width,
+            relief="flat",
+        )
+        style.configure(
+            "Dragging.AccountRow.TFrame",
+            borderwidth=drag_border_width,
+            relief="solid",
+        )
+        style.configure(
+            "AccountDragHandle.TLabel",
+            foreground="#6b7280",
+        )
+        style.configure(
+            "Dragging.AccountDragHandle.TLabel",
+            foreground="#2563eb",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
         return scale
 
     def _px(self, value: int) -> int:
@@ -156,7 +183,7 @@ class FashionMallClient:
         account_toolbar = ttk.Frame(accounts_frame)
         account_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, self._px(6)))
         account_toolbar.columnconfigure(0, weight=1)
-        ttk.Label(account_toolbar, text="按顺序执行所有勾选“使用”的账号").grid(
+        ttk.Label(account_toolbar, text="拖动左侧“↕ 序号”排序，按顺序执行所有勾选“使用”的账号").grid(
             row=0, column=0, sticky="w"
         )
         show_button = ttk.Checkbutton(
@@ -286,7 +313,11 @@ class FashionMallClient:
 
     def _add_account_row(self, values: dict | None = None) -> None:
         values = values or {}
-        row_frame = ttk.Frame(self.accounts_container)
+        row_frame = ttk.Frame(
+            self.accounts_container,
+            style="AccountRow.TFrame",
+            padding=(self._px(2), self._px(1)),
+        )
         row_frame.pack(fill="x", pady=self._px(3))
         row_frame.columnconfigure(1, weight=3)
         row_frame.columnconfigure(2, weight=3)
@@ -309,6 +340,7 @@ class FashionMallClient:
             text=f"↕ {len(self.account_rows) + 1}",
             width=5,
             cursor="fleur",
+            style="AccountDragHandle.TLabel",
         )
         number_label.grid(row=0, column=0, padx=(0, self._px(4)))
         account_entry = ttk.Entry(row_frame, textvariable=account_var)
@@ -384,7 +416,7 @@ class FashionMallClient:
         self.account_rows.append(row)
         number_label.bind(
             "<ButtonPress-1>",
-            lambda _event, frame=row_frame: self._start_account_drag(frame),
+            lambda event, frame=row_frame: self._start_account_drag(frame, event),
         )
         number_label.bind("<B1-Motion>", self._drag_account_row)
         number_label.bind("<ButtonRelease-1>", self._end_account_drag)
@@ -404,31 +436,63 @@ class FashionMallClient:
         self._refresh_accounts_scrollregion()
         self.accounts_canvas.yview_moveto(1.0)
 
-    def _start_account_drag(self, frame: ttk.Frame):
+    def _start_account_drag(self, frame: ttk.Frame, event=None):
         if not self.account_drag_enabled:
             return "break"
         self.dragged_account_row = next(
             (row for row in self.account_rows if row["frame"] is frame),
             None,
         )
+        self.account_drag_start_y = event.y_root if event is not None else 0
+        self.account_drag_active = False
         self.account_drag_changed = False
         return "break"
+
+    def _set_account_drag_visual(self, row: dict, active: bool) -> None:
+        row["frame"].configure(
+            style="Dragging.AccountRow.TFrame" if active else "AccountRow.TFrame"
+        )
+        row["number_label"].configure(
+            style=(
+                "Dragging.AccountDragHandle.TLabel"
+                if active
+                else "AccountDragHandle.TLabel"
+            ),
+            cursor="fleur" if self.account_drag_enabled else "arrow",
+        )
+
+    def _auto_scroll_accounts(self, pointer_y: int) -> None:
+        canvas_top = self.accounts_canvas.winfo_rooty()
+        canvas_bottom = canvas_top + self.accounts_canvas.winfo_height()
+        margin = self._px(24)
+        if pointer_y < canvas_top + margin:
+            self.accounts_canvas.yview_scroll(-1, "units")
+            self.root.update_idletasks()
+        elif pointer_y > canvas_bottom - margin:
+            self.accounts_canvas.yview_scroll(1, "units")
+            self.root.update_idletasks()
 
     def _drag_account_row(self, event):
         dragged_row = self.dragged_account_row
         if not self.account_drag_enabled or dragged_row is None:
             return "break"
 
-        centers = [
+        if not self.account_drag_active:
+            if abs(event.y_root - self.account_drag_start_y) < self._px(6):
+                return "break"
+            self.account_drag_active = True
+            self._set_account_drag_visual(dragged_row, True)
+
+        self._auto_scroll_accounts(event.y_root)
+
+        other_centers = [
             row["frame"].winfo_rooty() + row["frame"].winfo_height() // 2
             for row in self.account_rows
+            if row is not dragged_row
         ]
-        if not centers:
+        if not other_centers:
             return "break"
-        target_index = min(
-            range(len(centers)),
-            key=lambda index: abs(event.y_root - centers[index]),
-        )
+        target_index = drag_insertion_index(event.y_root, other_centers)
         if move_list_item(self.account_rows, dragged_row, target_index):
             self.account_drag_changed = True
             self._repack_account_rows()
@@ -436,10 +500,12 @@ class FashionMallClient:
 
     def _end_account_drag(self, _event=None):
         if self.dragged_account_row is not None:
+            self._set_account_drag_visual(self.dragged_account_row, False)
             self.dragged_account_row = None
             if self.account_drag_changed:
                 self._append_log("账号执行顺序已调整；点击开始后将按当前顺序执行。")
         self.account_drag_changed = False
+        self.account_drag_active = False
         return "break"
 
     def _repack_account_rows(self) -> None:
@@ -496,7 +562,10 @@ class FashionMallClient:
     def _set_account_controls_state(self, state: str) -> None:
         self.account_drag_enabled = state == "normal"
         if not self.account_drag_enabled:
+            if self.dragged_account_row is not None:
+                self._set_account_drag_visual(self.dragged_account_row, False)
             self.dragged_account_row = None
+            self.account_drag_active = False
             self.account_drag_changed = False
         for widget in self.account_widgets:
             try:
