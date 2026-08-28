@@ -678,17 +678,49 @@ class FashionMallClient:
         continue_on_process_error: bool = False,
         package_error_diagnostics: bool = True,
     ) -> None:
+        diagnostic_context = None
+        diagnostic_attempted = False
+
+        def package_current_error(error_message: str):
+            nonlocal diagnostic_attempted
+            diagnostic_attempted = True
+            if not package_error_diagnostics or diagnostic_context is None:
+                return None
+            account_config, account_index, account_screenshot_dir = diagnostic_context
+            try:
+                archive_path = archive_recent_steps(
+                    self.session_log_path,
+                    account_screenshot_dir,
+                    runner.RUNTIME_DIR / "error-diagnostics",
+                    account_name=account_config["account"],
+                    account_index=account_index,
+                    error_message=error_message,
+                )
+            except Exception as archive_error:
+                self._report(f"[报错诊断] ZIP 生成失败：{archive_error}")
+                return None
+            self._report(
+                f"[报错诊断] 最近 5 步操作和截图已保存至：{archive_path}"
+            )
+            return archive_path
+
         try:
             total = len(accounts)
             recovered_error_count = 0
             for index, account_config in enumerate(accounts, start=1):
+                account_screenshot_dir = self.debug_screenshot_dir / f"account-{index}"
+                diagnostic_context = (
+                    account_config,
+                    index,
+                    account_screenshot_dir,
+                )
+                diagnostic_attempted = False
                 runner.ensure_not_cancelled(cancel_event)
                 self._report(
                     client_state.progress_message(
                         index, total, account_config["server_number"]
                     )
                 )
-                account_screenshot_dir = self.debug_screenshot_dir / f"account-{index}"
                 try:
                     completed = runner.run_automation(
                         account_config["account"],
@@ -705,25 +737,7 @@ class FashionMallClient:
                 except runner.AutomationCancelled:
                     raise
                 except Exception as error:
-                    archive_path = None
-                    if package_error_diagnostics:
-                        try:
-                            archive_path = archive_recent_steps(
-                                self.session_log_path,
-                                account_screenshot_dir,
-                                runner.RUNTIME_DIR / "error-diagnostics",
-                                account_name=account_config["account"],
-                                account_index=index,
-                                error_message=str(error),
-                            )
-                        except Exception as archive_error:
-                            self._report(
-                                f"[报错诊断] ZIP 生成失败：{archive_error}"
-                            )
-                        else:
-                            self._report(
-                                f"[报错诊断] 最近 5 步操作和截图已保存至：{archive_path}"
-                            )
+                    archive_path = package_current_error(str(error))
                     if not continue_on_process_error:
                         if archive_path is not None:
                             raise RuntimeError(
@@ -742,7 +756,11 @@ class FashionMallClient:
                         self._report("[账号队列] 即将重新打开游戏并执行下一个账号")
                     continue
                 if not completed:
-                    self._emit("incomplete", client_state.incomplete_message(index, total))
+                    incomplete_message = client_state.incomplete_message(index, total)
+                    archive_path = package_current_error(incomplete_message)
+                    if archive_path is not None:
+                        incomplete_message += f"\n报错诊断包：{archive_path}"
+                    self._emit("incomplete", incomplete_message)
                     return
                 self._report(f"[账号队列] 第 {index}/{total} 个账号已完成，游戏已关闭")
                 if index < total:
@@ -750,7 +768,13 @@ class FashionMallClient:
         except runner.AutomationCancelled as error:
             self._emit("cancelled", str(error))
         except Exception as error:
-            self._emit("error", str(error))
+            archive_path = None
+            if not diagnostic_attempted:
+                archive_path = package_current_error(str(error))
+            error_message = str(error)
+            if archive_path is not None:
+                error_message += f"\n报错诊断包：{archive_path}"
+            self._emit("error", error_message)
         else:
             if recovered_error_count:
                 diagnostic_summary = (
