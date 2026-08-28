@@ -202,7 +202,7 @@ class FashionMallClient:
         ttk.Label(account_header, text="游戏账号").grid(row=0, column=1, sticky="w", padx=self._px(3))
         ttk.Label(account_header, text="游戏密码").grid(row=0, column=2, sticky="w", padx=self._px(3))
         ttk.Label(account_header, text="区号", width=6).grid(row=0, column=3, padx=self._px(3))
-        ttk.Label(account_header, text="培育档位", width=10).grid(row=0, column=4, padx=self._px(3))
+        ttk.Label(account_header, text="培育选择", width=13).grid(row=0, column=4, padx=self._px(3))
         ttk.Label(account_header, text="启用", width=5).grid(row=0, column=5, padx=self._px(3))
         ttk.Label(account_header, text="操作", width=5).grid(row=0, column=6)
         for account_config in self.initial_account_configs:
@@ -266,7 +266,7 @@ class FashionMallClient:
 
         ttk.Label(
             outer,
-            text="账号、密码、区号和培育档位会保存在 runtime/config/client_config.json。",
+            text="账号、密码、区号和培育选择会保存在 runtime/config/client_config.json。",
             foreground="#666666",
         ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
 
@@ -294,9 +294,14 @@ class FashionMallClient:
         account_var = tk.StringVar(value=str(values.get("account", "")))
         password_var = tk.StringVar(value=str(values.get("password", "")))
         server_var = tk.StringVar(value=str(values.get("server_number", 1)))
-        cultivation_level_var = tk.StringVar(
-            value=runner.normalize_cultivation_level(values.get("cultivation_level"))
+        selected_cultivation_levels = runner.normalize_cultivation_levels(
+            values.get("cultivation_levels", values.get("cultivation_level"))
         )
+        cultivation_level_vars = {
+            level: tk.BooleanVar(value=level in selected_cultivation_levels)
+            for level in runner.CULTIVATION_LEVELS
+        }
+        cultivation_summary_var = tk.StringVar()
         active_var = tk.BooleanVar(value=bool(values.get("active", True)))
 
         number_label = ttk.Label(
@@ -318,14 +323,42 @@ class FashionMallClient:
             row_frame, from_=1, to=999, textvariable=server_var, width=6
         )
         server_entry.grid(row=0, column=3, padx=self._px(3))
-        cultivation_level_box = ttk.Combobox(
+        cultivation_button = ttk.Menubutton(
             row_frame,
-            textvariable=cultivation_level_var,
-            values=runner.CULTIVATION_LEVELS,
-            state="readonly",
-            width=9,
+            textvariable=cultivation_summary_var,
+            width=13,
         )
-        cultivation_level_box.grid(row=0, column=4, padx=self._px(3))
+        cultivation_menu = tk.Menu(cultivation_button, tearoff=False)
+
+        def update_cultivation_summary() -> None:
+            abbreviations = {
+                "入门培育": "入",
+                "初级培育": "初",
+                "中级培育": "中",
+                "高级培育": "高",
+            }
+            selected = [
+                level
+                for level in runner.CULTIVATION_LEVELS
+                if cultivation_level_vars[level].get()
+            ]
+            if len(selected) == len(runner.CULTIVATION_LEVELS):
+                cultivation_summary_var.set("全部 4 项")
+            elif selected:
+                labels = "/".join(abbreviations[level] for level in selected)
+                cultivation_summary_var.set(f"{labels}（{len(selected)}）")
+            else:
+                cultivation_summary_var.set("请选择")
+
+        for level in runner.CULTIVATION_LEVELS:
+            cultivation_menu.add_checkbutton(
+                label=level,
+                variable=cultivation_level_vars[level],
+                command=update_cultivation_summary,
+            )
+        cultivation_button.configure(menu=cultivation_menu)
+        update_cultivation_summary()
+        cultivation_button.grid(row=0, column=4, padx=self._px(3))
         active_button = ttk.Checkbutton(row_frame, text="使用", variable=active_var)
         active_button.grid(row=0, column=5, padx=self._px(3))
         remove_button = ttk.Button(
@@ -342,11 +375,11 @@ class FashionMallClient:
             "account": account_var,
             "password": password_var,
             "server_number": server_var,
-            "cultivation_level": cultivation_level_var,
+            "cultivation_levels": cultivation_level_vars,
             "active": active_var,
             "account_entry": account_entry,
             "password_entry": password_entry,
-            "cultivation_level_box": cultivation_level_box,
+            "cultivation_button": cultivation_button,
         }
         self.account_rows.append(row)
         number_label.bind(
@@ -360,7 +393,7 @@ class FashionMallClient:
                 account_entry,
                 password_entry,
                 server_entry,
-                cultivation_level_box,
+                cultivation_button,
                 active_button,
                 remove_button,
             )
@@ -447,8 +480,12 @@ class FashionMallClient:
                     "account": account,
                     "password": password,
                     "server_number": server_number,
-                    "cultivation_level": runner.validate_cultivation_level(
-                        row["cultivation_level"].get()
+                    "cultivation_levels": runner.validate_cultivation_levels(
+                        [
+                            level
+                            for level in runner.CULTIVATION_LEVELS
+                            if row["cultivation_levels"][level].get()
+                        ]
                     ),
                     "active": bool(row["active"].get()),
                 }
@@ -466,9 +503,6 @@ class FashionMallClient:
                 widget.configure(state=state)
             except tk.TclError:
                 pass
-        if state == "normal":
-            for row in self.account_rows:
-                row["cultivation_level_box"].configure(state="readonly")
         for row in self.account_rows:
             row["number_label"].configure(
                 cursor="fleur" if self.account_drag_enabled else "arrow"
@@ -547,7 +581,7 @@ class FashionMallClient:
     def _clear_config(self) -> None:
         if not messagebox.askyesno(
             "清除本地配置",
-            "确定删除本地保存的账号、密码、区号和培育档位吗？",
+            "确定删除本地保存的账号、密码、区号和培育选择吗？",
             parent=self.root,
         ):
             return
@@ -591,8 +625,9 @@ class FashionMallClient:
                         account_config["account"],
                         account_config["password"],
                         server_number=account_config["server_number"],
-                        cultivation_level=account_config.get(
-                            "cultivation_level", runner.DEFAULT_CULTIVATION_LEVEL
+                        cultivation_levels=account_config.get(
+                            "cultivation_levels",
+                            list(runner.DEFAULT_CULTIVATION_LEVELS),
                         ),
                         report=self._report,
                         cancel_event=cancel_event,

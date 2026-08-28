@@ -34,11 +34,32 @@ def normalize_level(value: object, levels: Iterable[str], default: str) -> str:
     return normalized if normalized in levels else default
 
 
+def normalize_levels(
+    value: object,
+    levels: Iterable[str],
+    default: Iterable[str],
+) -> list[str]:
+    """规范化多选培育档位，并按界面固定顺序去重。"""
+
+    level_values = tuple(levels)
+    if isinstance(value, str):
+        requested = {value.strip()}
+    elif isinstance(value, (list, tuple, set)):
+        requested = {str(item).strip() for item in value}
+    else:
+        requested = set()
+    normalized = [level for level in level_values if level in requested]
+    if normalized:
+        return normalized
+    default_values = {str(item).strip() for item in default}
+    return [level for level in level_values if level in default_values]
+
+
 def load_accounts(
     config: dict,
     *,
     levels: Iterable[str],
-    default_level: str,
+    default_levels: Iterable[str],
 ) -> list[dict]:
     """读取多账号格式，并兼容旧版单账号格式。
 
@@ -62,8 +83,10 @@ def load_accounts(
                     "account": str(item.get("account", "")).strip(),
                     "password": str(item.get("password", "")),
                     "server_number": server_number,
-                    "cultivation_level": normalize_level(
-                        item.get("cultivation_level"), level_values, default_level
+                    "cultivation_levels": normalize_levels(
+                        item.get("cultivation_levels", item.get("cultivation_level")),
+                        level_values,
+                        default_levels,
                     ),
                     "active": bool(item.get("active", True)),
                 }
@@ -83,8 +106,10 @@ def load_accounts(
                 "account": account,
                 "password": password,
                 "server_number": server_number,
-                "cultivation_level": normalize_level(
-                    config.get("cultivation_level"), level_values, default_level
+                "cultivation_levels": normalize_levels(
+                    config.get("cultivation_levels", config.get("cultivation_level")),
+                    level_values,
+                    default_levels,
                 ),
                 "active": True,
             }
@@ -107,10 +132,10 @@ def load_package_error_diagnostics(config: dict) -> bool:
 def normalize_accounts_for_save(
     accounts: Iterable[dict],
     *,
-    default_level: str,
+    default_levels: Iterable[str],
     validate_credential: Callable[[str, str], object],
     validate_server_number: Callable[[int], object],
-    validate_level: Callable[[object], str],
+    validate_levels: Callable[[object], list[str]],
 ) -> list[dict]:
     """校验并转换待保存的账号队列。"""
 
@@ -122,15 +147,18 @@ def normalize_accounts_for_save(
         validate_credential(account, "账号")
         validate_credential(password, "密码")
         validate_server_number(server_number)
-        cultivation_level = validate_level(
-            item.get("cultivation_level", default_level)
+        cultivation_levels = validate_levels(
+            item.get(
+                "cultivation_levels",
+                item.get("cultivation_level", list(default_levels)),
+            )
         )
         normalized_accounts.append(
             {
                 "account": account,
                 "password": password,
                 "server_number": server_number,
-                "cultivation_level": cultivation_level,
+                "cultivation_levels": cultivation_levels,
                 "active": bool(item.get("active", True)),
             }
         )
@@ -141,10 +169,10 @@ def write_accounts(
     path: Path,
     accounts: Iterable[dict],
     *,
-    default_level: str,
+    default_levels: Iterable[str],
     validate_credential: Callable[[str, str], object],
     validate_server_number: Callable[[int], object],
-    validate_level: Callable[[object], str],
+    validate_levels: Callable[[object], list[str]],
     continue_on_process_error: bool = False,
     package_error_diagnostics: bool = True,
 ) -> None:
@@ -152,10 +180,10 @@ def write_accounts(
 
     normalized_accounts = normalize_accounts_for_save(
         accounts,
-        default_level=default_level,
+        default_levels=default_levels,
         validate_credential=validate_credential,
         validate_server_number=validate_server_number,
-        validate_level=validate_level,
+        validate_levels=validate_levels,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {

@@ -168,6 +168,7 @@ PARTNER_CANDIDATE_ENTRIES = (
 )
 CULTIVATION_LEVELS = ("入门培育", "初级培育", "中级培育", "高级培育")
 DEFAULT_CULTIVATION_LEVEL = CULTIVATION_LEVELS[0]
+DEFAULT_CULTIVATION_LEVELS = CULTIVATION_LEVELS[:3]
 CULTIVATION_ACTION_ENTRIES = {
     "入门培育": "执行入门培育",
     "初级培育": "执行初级培育",
@@ -326,9 +327,36 @@ def normalize_cultivation_level(value) -> str:
     )
 
 
+def normalize_cultivation_levels(value) -> list[str]:
+    return config_store.normalize_levels(
+        value, CULTIVATION_LEVELS, DEFAULT_CULTIVATION_LEVELS
+    )
+
+
 def validate_cultivation_level(value) -> str:
     normalized = str(value or "").strip()
     if normalized not in CULTIVATION_LEVELS:
+        raise RuntimeError(
+            "花房培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
+        )
+    return normalized
+
+
+def validate_cultivation_levels(value) -> list[str]:
+    if isinstance(value, str):
+        requested = [value]
+    elif isinstance(value, (list, tuple, set)):
+        requested = list(value)
+    else:
+        requested = []
+    normalized = []
+    for level in CULTIVATION_LEVELS:
+        if level in requested and level not in normalized:
+            normalized.append(level)
+    if not normalized:
+        raise RuntimeError("请至少选择一个花房培育档位。")
+    invalid = [str(level) for level in requested if level not in CULTIVATION_LEVELS]
+    if invalid:
         raise RuntimeError(
             "花房培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
         )
@@ -342,7 +370,7 @@ def load_account_configs(config: dict | None = None) -> list[dict]:
     return config_store.load_accounts(
         config,
         levels=CULTIVATION_LEVELS,
-        default_level=DEFAULT_CULTIVATION_LEVEL,
+        default_levels=DEFAULT_CULTIVATION_LEVELS,
     )
 
 
@@ -370,10 +398,10 @@ def save_account_configs(
     config_store.write_accounts(
         CLIENT_CONFIG_PATH,
         accounts,
-        default_level=DEFAULT_CULTIVATION_LEVEL,
+        default_levels=DEFAULT_CULTIVATION_LEVELS,
         validate_credential=validate_credential,
         validate_server_number=validate_server_number,
-        validate_level=validate_cultivation_level,
+        validate_levels=validate_cultivation_levels,
         continue_on_process_error=continue_on_process_error,
         package_error_diagnostics=package_error_diagnostics,
     )
@@ -383,15 +411,16 @@ def save_local_config(
     account: str,
     password: str,
     server_number: int,
-    cultivation_level: str = DEFAULT_CULTIVATION_LEVEL,
+    cultivation_levels=None,
 ) -> None:
+    cultivation_levels = normalize_cultivation_levels(cultivation_levels)
     save_account_configs(
         [
             {
                 "account": account,
                 "password": password,
                 "server_number": server_number,
-                "cultivation_level": cultivation_level,
+                "cultivation_levels": cultivation_levels,
                 "active": True,
             }
         ]
@@ -3376,11 +3405,11 @@ def complete_lady_cultivation_daily(
     tasker: Tasker,
     controller: AdbController,
     daily_plan: dict[str, str],
-    cultivation_level: str,
+    cultivation_levels,
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    cultivation_level = validate_cultivation_level(cultivation_level)
+    cultivation_levels = validate_cultivation_levels(cultivation_levels)
     if daily_plan.get("lady_cultivation") != DAILY_STATE_TODO:
         report(
             "[日常计划] 跳过名媛会培育1次："
@@ -3388,7 +3417,11 @@ def complete_lady_cultivation_daily(
         )
         return
 
-    report(f"[日常计划] 执行名媛会培育1次；档位={cultivation_level}")
+    level_summary = "、".join(cultivation_levels)
+    report(
+        f"[日常计划] 执行名媛会培育；共 {len(cultivation_levels)} 档："
+        f"{level_summary}"
+    )
     run_daily_forward(
         tasker,
         controller,
@@ -3399,17 +3432,21 @@ def complete_lady_cultivation_daily(
     )
     enter_debutante_club_from_main(tasker, report, cancel_event)
     enter_flower_room_from_debutante_club(tasker, report, cancel_event)
-    action_entry = CULTIVATION_ACTION_ENTRIES[cultivation_level]
-    report(f"[花房培育] 选择{cultivation_level}")
-    run_task(tasker, action_entry, report, cancel_event)
-    dismiss_result_overlay(
-        tasker,
-        controller,
-        "花房培育恭喜获得弹层",
-        report,
-        cancel_event,
-    )
-    run_task(tasker, "花房培育界面已打开", report, cancel_event)
+    for index, cultivation_level in enumerate(cultivation_levels, start=1):
+        action_entry = CULTIVATION_ACTION_ENTRIES[cultivation_level]
+        report(
+            f"[花房培育] 执行第 {index}/{len(cultivation_levels)} 档："
+            f"{cultivation_level}"
+        )
+        run_task(tasker, action_entry, report, cancel_event)
+        dismiss_result_overlay(
+            tasker,
+            controller,
+            "花房培育恭喜获得弹层",
+            report,
+            cancel_event,
+        )
+        run_task(tasker, "花房培育界面已打开", report, cancel_event)
     run_confirmed_transition(
         tasker,
         "花房培育返回名媛会",
@@ -3417,7 +3454,7 @@ def complete_lady_cultivation_daily(
         report,
         cancel_event,
     )
-    report(f"[日常计划] 已执行：名媛会培育1次（{cultivation_level}）")
+    report(f"[日常计划] 已执行名媛会培育：{level_summary}")
 
 
 def enter_manor_supply_from_debutante_club(
@@ -3899,7 +3936,7 @@ def run_automation(
     account: str,
     password: str,
     server_number: int = 1,
-    cultivation_level: str = DEFAULT_CULTIVATION_LEVEL,
+    cultivation_levels=None,
     device=None,
     report: Reporter = print,
     cancel_event=None,
@@ -3910,7 +3947,9 @@ def run_automation(
     validate_credential(account, "账号")
     validate_credential(password, "密码")
     validate_server_number(server_number)
-    cultivation_level = validate_cultivation_level(cultivation_level)
+    if cultivation_levels is None:
+        cultivation_levels = list(DEFAULT_CULTIVATION_LEVELS)
+    cultivation_levels = validate_cultivation_levels(cultivation_levels)
     ensure_not_cancelled(cancel_event)
 
     prepare_secure_runtime()
@@ -3994,7 +4033,7 @@ def run_automation(
             tasker,
             controller,
             daily_plan,
-            cultivation_level,
+            cultivation_levels,
             report,
             cancel_event,
         )
@@ -4030,7 +4069,7 @@ def main() -> None:
                 "account": account,
                 "password": password,
                 "server_number": server_number,
-                "cultivation_level": DEFAULT_CULTIVATION_LEVEL,
+                "cultivation_levels": list(DEFAULT_CULTIVATION_LEVELS),
                 "active": True,
             }
         ]
@@ -4041,8 +4080,8 @@ def main() -> None:
             account_config["account"],
             account_config["password"],
             server_number=account_config["server_number"],
-            cultivation_level=account_config.get(
-                "cultivation_level", DEFAULT_CULTIVATION_LEVEL
+            cultivation_levels=account_config.get(
+                "cultivation_levels", list(DEFAULT_CULTIVATION_LEVELS)
             ),
             device=device,
         )
