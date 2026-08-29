@@ -18,7 +18,7 @@ if "--self-check" in sys.argv:
 
 from fashion_mall import client_state
 from fashion_mall import copy as copy_text
-from fashion_mall.diagnostics import archive_recent_steps
+from fashion_mall.diagnostics import archive_recent_steps, cleanup_error_archives
 from fashion_mall.paths import resolve_paths
 from fashion_mall.ui_helpers import (
     calculate_ui_scale,
@@ -36,13 +36,15 @@ else:
 
 
 APP_VERSION = _PATHS.version_path.read_text(encoding="utf-8").strip()
-BASE_WINDOW_WIDTH = 780
+BASE_WINDOW_WIDTH = 1120
 BASE_WINDOW_HEIGHT = 620
-MIN_WINDOW_WIDTH = 700
+MIN_WINDOW_WIDTH = 1000
 MIN_WINDOW_HEIGHT = 480
 ERROR_HANDLING_NEXT_ACCOUNT = "切换到下一个账号继续"
 ERROR_HANDLING_SKIP_TASK = "跳过该任务并继续执行"
+ERROR_HANDLING_STOP = "立刻弹出报错并停止"
 ERROR_HANDLING_OPTIONS = (
+    ERROR_HANDLING_STOP,
     ERROR_HANDLING_NEXT_ACCOUNT,
     ERROR_HANDLING_SKIP_TASK,
 )
@@ -97,11 +99,12 @@ class FashionMallClient:
         self.account_drag_enabled = True
         self.show_password = tk.BooleanVar(value=False)
         self.account_selection_summary = tk.StringVar(value="已选择 0/0 个账号")
-        saved_error_handling = (
-            ERROR_HANDLING_SKIP_TASK
-            if runner.load_continue_on_task_error(local_config)
-            else ERROR_HANDLING_NEXT_ACCOUNT
-        )
+        if runner.load_continue_on_task_error(local_config):
+            saved_error_handling = ERROR_HANDLING_SKIP_TASK
+        elif runner.load_continue_on_process_error(local_config):
+            saved_error_handling = ERROR_HANDLING_NEXT_ACCOUNT
+        else:
+            saved_error_handling = ERROR_HANDLING_STOP
         self.error_handling_mode = tk.StringVar(value=saved_error_handling)
         self.package_error_diagnostics = tk.BooleanVar(
             value=runner.load_package_error_diagnostics(local_config)
@@ -124,6 +127,7 @@ class FashionMallClient:
             f"诊断日志：{self.session_log_path}",
             persist=False,
         )
+        self._cleanup_error_diagnostics(automatic=True)
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -205,8 +209,9 @@ class FashionMallClient:
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=self._px(20))
         outer.pack(fill="both", expand=True)
-        outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(5, weight=1)
+        outer.columnconfigure(1, weight=3)
+        outer.columnconfigure(2, weight=2)
+        outer.rowconfigure(1, weight=1)
 
         ttk.Label(
             outer,
@@ -217,8 +222,9 @@ class FashionMallClient:
         )
 
         accounts_frame = ttk.LabelFrame(outer, text="账号队列", padding=self._px(8))
-        accounts_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        accounts_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
         accounts_frame.columnconfigure(0, weight=1)
+        accounts_frame.rowconfigure(1, weight=1)
 
         account_toolbar = ttk.Frame(accounts_frame)
         account_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, self._px(6)))
@@ -286,7 +292,7 @@ class FashionMallClient:
             borderwidth=0,
             highlightthickness=0,
         )
-        self.accounts_canvas.grid(row=1, column=0, sticky="ew")
+        self.accounts_canvas.grid(row=1, column=0, sticky="nsew")
         accounts_scrollbar = ttk.Scrollbar(
             list_frame, orient="vertical", command=self.accounts_canvas.yview
         )
@@ -308,64 +314,97 @@ class FashionMallClient:
         mode_frame.grid(
             row=2,
             column=0,
-            columnspan=3,
+            columnspan=2,
             sticky="ew",
             pady=(self._px(12), 0),
         )
-        ttk.Label(mode_frame, text="当遇到任务错误/异常时，").grid(
-            row=0, column=0, sticky="w"
+        error_handling_row = ttk.Frame(mode_frame)
+        error_handling_row.grid(row=0, column=0, sticky="w")
+        ttk.Label(error_handling_row, text="当遇到任务错误/异常时：").pack(
+            side="left", anchor="n", padx=(0, self._px(6))
         )
-        self.error_handling_mode_box = ttk.Combobox(
-            mode_frame,
-            textvariable=self.error_handling_mode,
-            values=ERROR_HANDLING_OPTIONS,
-            state="readonly",
-            width=24,
-        )
-        self.error_handling_mode_box.grid(row=0, column=1, sticky="w")
-        ttk.Label(mode_frame, text="。").grid(row=0, column=2, sticky="w")
+        error_handling_frame = ttk.Frame(error_handling_row)
+        error_handling_frame.pack(side="left", anchor="n")
+        self.error_handling_buttons = []
+        for row, option in enumerate(ERROR_HANDLING_OPTIONS):
+            button = ttk.Radiobutton(
+                error_handling_frame,
+                text=option,
+                variable=self.error_handling_mode,
+                value=option,
+            )
+            button.grid(row=row, column=0, sticky="w", pady=(0, self._px(3)))
+            self.error_handling_buttons.append(button)
         self.error_diagnostic_button = ttk.Checkbutton(
             mode_frame,
             text="保存错误现场：发生错误时，在 runtime/error-diagnostics 中生成错误诊断包",
             variable=self.package_error_diagnostics,
         )
         self.error_diagnostic_button.grid(
-            row=1, column=0, columnspan=3, sticky="w"
+            row=1, column=0, sticky="w", pady=(self._px(5), 0)
         )
-        self.account_widgets.extend(
-            (
-                self.error_handling_mode_box,
-                self.error_diagnostic_button,
-            )
+        self.cleanup_diagnostics_button = ttk.Button(
+            mode_frame,
+            text="清理错误包",
+            command=self._confirm_cleanup_error_diagnostics,
         )
+        self.cleanup_diagnostics_button.grid(
+            row=1,
+            column=1,
+            sticky="e",
+            padx=(self._px(12), 0),
+            pady=(self._px(5), 0),
+        )
+        self.account_widgets.extend(self.error_handling_buttons)
+        self.account_widgets.append(self.error_diagnostic_button)
+        self.account_widgets.append(self.cleanup_diagnostics_button)
 
         controls = ttk.Frame(outer)
         controls.grid(
             row=3,
             column=0,
-            columnspan=3,
+            columnspan=2,
             sticky="ew",
             pady=(self._px(14), self._px(10)),
         )
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
         controls.columnconfigure(2, weight=1)
+        controls.columnconfigure(3, weight=1)
         self.start_button = ttk.Button(controls, text="开始运行", command=self._start)
         self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, self._px(6)))
         self.stop_button = ttk.Button(controls, text="停止运行", command=self._stop, state="disabled")
         self.stop_button.grid(row=0, column=1, sticky="ew", padx=self._px(6))
+        self.import_button = ttk.Button(
+            controls,
+            text="导入所有本地配置",
+            command=self._import_local_config,
+        )
+        self.import_button.grid(row=0, column=2, sticky="ew", padx=self._px(6))
         self.clear_button = ttk.Button(controls, text="清除本地配置", command=self._clear_config)
-        self.clear_button.grid(row=0, column=2, sticky="ew", padx=(self._px(6), 0))
+        self.clear_button.grid(row=0, column=3, sticky="ew", padx=(self._px(6), 0))
 
         ttk.Label(outer, textvariable=self.status, foreground="#2563eb").grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(0, self._px(8))
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, self._px(8))
         )
 
         log_frame = ttk.LabelFrame(outer, text="运行日志", padding=self._px(8))
-        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(
+            row=1,
+            column=2,
+            rowspan=5,
+            sticky="nsew",
+            padx=(self._px(12), 0),
+        )
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
-        self.log = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 10))
+        self.log = tk.Text(
+            log_frame,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 10),
+            width=40,
+        )
         self.log.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -375,7 +414,7 @@ class FashionMallClient:
             outer,
             text="账号、密码、目标区服和培育档位会保存到本地配置文件。",
             foreground="#666666",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(self._px(10), 0))
 
         self.account_rows[0]["account_entry"].focus_set()
         self.root.bind("<Return>", lambda _event: self._start())
@@ -392,10 +431,14 @@ class FashionMallClient:
         self.accounts_canvas.itemconfigure(self.accounts_window, width=event.width)
 
     def _sync_account_column_widths(self) -> None:
-        """让独立表头与账号行使用同一组列宽，避免后续列发生横向错位。"""
+        """同步固定列宽，并允许账号、密码列随左侧区域自适应收缩。"""
 
         frames = [self.account_header, *(row["frame"] for row in self.account_rows)]
         for column in range(7):
+            if column in (1, 2):
+                for frame in frames:
+                    frame.columnconfigure(column, minsize=0, weight=3)
+                continue
             requested_width = max(
                 (
                     widget.winfo_reqwidth()
@@ -405,7 +448,7 @@ class FashionMallClient:
                 default=0,
             )
             for frame in frames:
-                frame.columnconfigure(column, minsize=requested_width)
+                frame.columnconfigure(column, minsize=requested_width, weight=0)
 
     def _update_account_selection_summary(self) -> None:
         total = len(self.account_rows)
@@ -685,9 +728,6 @@ class FashionMallClient:
                 widget.configure(state=state)
             except tk.TclError:
                 pass
-        self.error_handling_mode_box.configure(
-            state="readonly" if state == "normal" else "disabled"
-        )
         for row in self.account_rows:
             row["number_label"].configure(
                 cursor="fleur" if self.account_drag_enabled else "arrow"
@@ -752,6 +792,7 @@ class FashionMallClient:
         self.cancel_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
+        self.import_button.configure(state="disabled")
         self._set_account_controls_state("disabled")
         self.status.set("正在运行")
         self._append_log(
@@ -771,6 +812,94 @@ class FashionMallClient:
         )
         self.worker.start()
 
+    def _replace_account_rows(self, account_configs: list[dict]) -> None:
+        for row in list(self.account_rows):
+            row["frame"].destroy()
+        self.account_rows.clear()
+        self.account_widgets = self.account_widgets[:2]
+        self.account_widgets.extend(self.error_handling_buttons)
+        self.account_widgets.append(self.error_diagnostic_button)
+        self.account_widgets.append(self.cleanup_diagnostics_button)
+        for account_config in account_configs:
+            self._add_account_row(account_config)
+
+    def _import_local_config(self) -> None:
+        source = filedialog.askopenfilename(
+            title="导入所有本地配置",
+            parent=self.root,
+            filetypes=(("JSON 配置文件", "*.json"), ("所有文件", "*.*")),
+        )
+        if not source:
+            return
+        try:
+            imported = runner.import_local_config(Path(source))
+            account_configs = runner.load_account_configs(imported)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            messagebox.showerror("配置导入失败", str(error), parent=self.root)
+            return
+
+        self._replace_account_rows(account_configs)
+        if runner.load_continue_on_task_error(imported):
+            self.error_handling_mode.set(ERROR_HANDLING_SKIP_TASK)
+        elif runner.load_continue_on_process_error(imported):
+            self.error_handling_mode.set(ERROR_HANDLING_NEXT_ACCOUNT)
+        else:
+            self.error_handling_mode.set(ERROR_HANDLING_STOP)
+        self.package_error_diagnostics.set(
+            runner.load_package_error_diagnostics(imported)
+        )
+        self._append_log(
+            f"[配置] 已导入全部本地配置，共载入 {len(account_configs)} 个账号。"
+        )
+        messagebox.showinfo(
+            "配置导入成功",
+            f"全部本地配置已应用，共导入 {len(account_configs)} 个账号。",
+            parent=self.root,
+        )
+
+    @staticmethod
+    def _format_size(size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB":
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024
+        return f"{size} B"
+
+    def _cleanup_error_diagnostics(self, *, automatic: bool) -> None:
+        archive_root = runner.RUNTIME_DIR / "error-diagnostics"
+        result = cleanup_error_archives(archive_root)
+        if result.removed_count:
+            action = "自动清理" if automatic else "清理"
+            self._append_log(
+                f"[错误包清理] 已{action} "
+                f"{result.removed_count} 个旧错误包，释放 "
+                f"{self._format_size(result.removed_bytes)}。"
+            )
+        if result.failed_count:
+            self._append_log(
+                f"[错误包清理] 有 {result.failed_count} 个错误包清理失败。"
+            )
+        if not automatic and not result.removed_count and not result.failed_count:
+            messagebox.showinfo("清理错误包", "当前没有需要清理的错误包。", parent=self.root)
+
+    def _confirm_cleanup_error_diagnostics(self) -> None:
+        archive_root = runner.RUNTIME_DIR / "error-diagnostics"
+        preview = cleanup_error_archives(archive_root, dry_run=True)
+        if not preview.removed_count:
+            messagebox.showinfo("清理错误包", "当前没有需要清理的错误包。", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "清理错误包",
+            f"将删除 {preview.removed_count} 个旧错误包，预计释放 "
+            f"{self._format_size(preview.removed_bytes)}。\n\n"
+            "规则：超过 14 天、每账号超过 10 个或总容量超过 1 GB。\n"
+            "始终保留最新的错误包。确定继续吗？",
+            parent=self.root,
+        ):
+            return
+        self._cleanup_error_diagnostics(automatic=False)
+
     def _clear_config(self) -> None:
         if not messagebox.askyesno(
             "清除本地配置",
@@ -783,19 +912,11 @@ class FashionMallClient:
         except OSError as error:
             messagebox.showerror("配置清除失败", str(error), parent=self.root)
             return
-        for row in list(self.account_rows):
-            row["frame"].destroy()
-        self.account_rows.clear()
-        self.account_widgets = self.account_widgets[:2]
-        self.account_widgets.extend(
-            (
-                self.error_handling_mode_box,
-                self.error_diagnostic_button,
-            )
+        self._replace_account_rows(
+            [{"account": "", "password": "", "server_number": 1, "active": True}]
         )
-        self.error_handling_mode.set(ERROR_HANDLING_NEXT_ACCOUNT)
+        self.error_handling_mode.set(ERROR_HANDLING_STOP)
         self.package_error_diagnostics.set(True)
-        self._add_account_row()
         self._append_log("[配置] 本地账号配置已清除。")
 
     def _run_worker(
@@ -830,6 +951,20 @@ class FashionMallClient:
             self._report(
                 f"[错误诊断包] 最近 5 步操作和截图已保存至：{archive_path}"
             )
+            cleanup_result = cleanup_error_archives(
+                runner.RUNTIME_DIR / "error-diagnostics",
+                protected_paths=(archive_path,),
+            )
+            if cleanup_result.removed_count:
+                self._report(
+                    "[错误包清理] 已清理 "
+                    f"{cleanup_result.removed_count} 个旧错误包，释放 "
+                    f"{self._format_size(cleanup_result.removed_bytes)}。"
+                )
+            if cleanup_result.failed_count:
+                self._report(
+                    f"[错误包清理] 有 {cleanup_result.failed_count} 个错误包清理失败。"
+                )
             return archive_path
 
         try:
@@ -948,6 +1083,7 @@ class FashionMallClient:
         self._append_log(message)
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
+        self.import_button.configure(state="normal")
         self._set_account_controls_state("normal")
         self.cancel_event = None
 
@@ -1010,7 +1146,7 @@ class FashionMallClient:
 
 
 def main() -> None:
-    global runner, tk, messagebox, ttk
+    global runner, tk, filedialog, messagebox, ttk
     if "--self-check" in sys.argv:
         marker_path = _SELF_CHECK_MARKER
         if marker_path is None:
@@ -1034,7 +1170,7 @@ def main() -> None:
         runner = runner_module
     # 延迟加载 UI 依赖，使便携版的无界面自检不受 Tk 安装/显示环境影响。
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     enable_windows_dpi_awareness()
     root = tk.Tk()

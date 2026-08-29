@@ -24,7 +24,7 @@
 ## 安全边界
 
 - `runtime/` 包含本机配置、日志和截图，不得提交或复制进发布包。
-- `runtime/config/client_config.json` 可能包含明文账号密码，禁止在输出、日志或报告中展示其内容。
+- `runtime/config/config.json` 可能包含明文账号密码，禁止在输出、日志或报告中展示其内容。
 - 不要启用 MaaFramework 文件日志或失败截图记录敏感输入。
 
 ## 当前状态

@@ -39,7 +39,7 @@ class ApplicationPaths:
 
     @property
     def client_config_path(self) -> Path:
-        return self.runtime_dir / "config" / "client_config.json"
+        return self.runtime_dir / "config" / "config.json"
 
 
 def resolve_paths(module_file: str | Path, runtime_module=sys) -> ApplicationPaths:

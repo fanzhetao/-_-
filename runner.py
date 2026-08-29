@@ -425,6 +425,27 @@ def save_account_configs(
     )
 
 
+def import_local_config(source_path: Path) -> dict:
+    """校验并完整导入一个配置 JSON，同时保留其中未知的未来字段。"""
+
+    imported = config_store.read_config_for_import(source_path)
+    accounts = load_account_configs(imported)
+    if not accounts:
+        raise ValueError("配置文件中没有可导入的账号。")
+    imported["accounts"] = config_store.normalize_accounts_for_save(
+        accounts,
+        default_levels=DEFAULT_CULTIVATION_LEVELS,
+        validate_credential=validate_credential,
+        validate_server_number=validate_server_number,
+        validate_levels=validate_cultivation_levels,
+    )
+    imported["continue_on_process_error"] = load_continue_on_process_error(imported)
+    imported["package_error_diagnostics"] = load_package_error_diagnostics(imported)
+    imported["continue_on_task_error"] = load_continue_on_task_error(imported)
+    config_store.write_local_config(CLIENT_CONFIG_PATH, imported)
+    return imported
+
+
 def save_local_config(
     account: str,
     password: str,

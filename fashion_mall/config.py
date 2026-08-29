@@ -27,6 +27,35 @@ def read_local_config(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def read_config_for_import(path: Path) -> dict:
+    """严格读取待导入的 JSON 配置，格式错误时向调用方报告原因。"""
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except OSError as error:
+        raise OSError(f"无法读取配置文件：{error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"配置文件不是有效的 JSON（第 {error.lineno} 行，第 {error.colno} 列）。"
+        ) from error
+    if not isinstance(data, dict):
+        raise ValueError("配置文件的最外层必须是 JSON 对象。")
+    return data
+
+
+def write_local_config(path: Path, data: dict) -> None:
+    """原子写入完整配置对象。"""
+
+    if not isinstance(data, dict):
+        raise ValueError("本地配置必须是 JSON 对象。")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=4) + "\n", encoding="utf-8"
+    )
+    temp_path.replace(path)
+
+
 def normalize_level(value: object, levels: Iterable[str], default: str) -> str:
     """将培育档位限制在受支持集合内。"""
 
@@ -192,18 +221,14 @@ def write_accounts(
         validate_server_number=validate_server_number,
         validate_levels=validate_levels,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
+    data = read_local_config(path)
+    data.update({
         "accounts": normalized_accounts,
         "continue_on_process_error": bool(continue_on_process_error),
         "package_error_diagnostics": bool(package_error_diagnostics),
         "continue_on_task_error": bool(continue_on_task_error),
-    }
-    temp_path = path.with_suffix(".tmp")
-    temp_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=4) + "\n", encoding="utf-8"
-    )
-    temp_path.replace(path)
+    })
+    write_local_config(path, data)
 
 
 def clear_config(path: Path) -> None:
