@@ -2,26 +2,42 @@
     "打开游戏到登录页": {
         "next": [
             "登录页已就绪",
+            "登录页联系客服已就绪",
             "点击时尚百货城图标"
         ],
         "timeout": 60000
+    },
+    "等待游戏登录页": {
+        "next": [
+            "登录页已就绪",
+            "登录页联系客服已就绪"
+        ],
+        "timeout": 90000
     },
     "点击时尚百货城图标": {
         "recognition": "OCR",
         "expected": "时尚百货城",
         "action": "Click",
         "post_delay": 2500,
-        "next": "登录页已就绪",
+        "next": [
+            "登录页已就绪",
+            "登录页联系客服已就绪"
+        ],
         "timeout": 90000
     },
     "登录页已就绪": {
         "recognition": "OCR",
-        "expected": "请输入账号|联系客户|注册账号",
+        "expected": "请输入账号|联系客户|联系客服|注册账号",
         "roi": [140, 430, 440, 420]
+    },
+    "登录页联系客服已就绪": {
+        "recognition": "OCR",
+        "expected": "联系客服",
+        "roi": [0, 0, 720, 1280]
     },
     "聚焦账号输入框": {
         "recognition": "OCR",
-        "expected": "TOMATO|联系客户",
+        "expected": "TOMATO|联系客户|联系客服",
         "roi": [170, 500, 380, 150],
         "action": "Click",
         "target": [360, 605]

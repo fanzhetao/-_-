@@ -69,7 +69,10 @@ INTERRUPTING_POPUP_ENTRIES = {
 UNKNOWN_POPUP_FALLBACK_ROUNDS = 3
 UNKNOWN_POPUP_FALLBACK_RETURN_POSITION = (50, 1230)
 UNKNOWN_POPUP_CLICK_SETTLE_SECONDS = 0.75
-UNKNOWN_POPUP_FALLBACK_EXCLUDED_ENTRIES = {"打开游戏到登录页"}
+UNKNOWN_POPUP_FALLBACK_EXCLUDED_ENTRIES = {
+    "打开游戏到登录页",
+    "等待游戏登录页",
+}
 MAIN_SCREEN_ANCHORS = (
     ("主界面锚点百货", "左下“百货”"),
     ("主界面锚点关卡伙伴", "底部“关卡/伙伴”"),
@@ -1162,7 +1165,11 @@ def login_and_enter_game(
     restart_count = 0
     while True:
         ensure_not_cancelled(cancel_event)
-        run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        if start_game_application(device, report):
+            run_task(tasker, "等待游戏登录页", report, cancel_event)
+        else:
+            report("[游戏启动] ADB 直接启动失败，回退到桌面图标识别。")
+            run_task(tasker, "打开游戏到登录页", report, cancel_event)
         validate_reference_canvas(controller, report)
 
         run_task(tasker, "聚焦账号输入框", report, cancel_event)
@@ -3772,6 +3779,76 @@ def close_game_application(device, report: Reporter = print) -> bool:
         "未关闭模拟器，自动化客户端保持打开"
     )
     return True
+
+
+def start_game_application(device, report: Reporter = print) -> bool:
+    """通过 ADB 包名直接启动游戏并确认进程存在。"""
+
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    package = os.environ.get("FASHION_MALL_PACKAGE", "").strip() or DEFAULT_GAME_PACKAGE
+    if not re.fullmatch(r"[A-Za-z][\w.]+", package):
+        report(f"[游戏启动] 游戏包名格式无效：{package}")
+        return False
+
+    adb_prefix = [str(device.adb_path), "-s", device.address, "shell"]
+    try:
+        installed = subprocess.run(
+            [*adb_prefix, "pm", "path", package],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=20,
+            check=False,
+            creationflags=creation_flags,
+        )
+        if installed.returncode != 0 or "package:" not in installed.stdout:
+            report(f"[游戏启动] 设备中未确认游戏包：{package}")
+            return False
+
+        launched = subprocess.run(
+            [
+                *adb_prefix,
+                "monkey",
+                "-p",
+                package,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=30,
+            check=False,
+            creationflags=creation_flags,
+        )
+        if launched.returncode != 0:
+            report(f"[游戏启动] ADB 启动命令失败：{package}")
+            return False
+
+        for _ in range(20):
+            running = subprocess.run(
+                [*adb_prefix, "pidof", package],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=10,
+                check=False,
+                creationflags=creation_flags,
+            )
+            if running.returncode == 0 and running.stdout.strip():
+                report(f"[游戏启动] 已通过 ADB 启动并确认游戏进程：{package}")
+                return True
+            time.sleep(0.25)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        report(f"[游戏启动] ADB 直接启动异常：{error}")
+        return False
+
+    report(f"[游戏启动] 已发送启动命令，但未确认游戏进程：{package}")
+    return False
 
 
 def close_game_after_process_error(report: Reporter = print) -> bool:
