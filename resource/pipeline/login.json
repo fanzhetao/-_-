@@ -805,14 +805,14 @@
     },
     "点击幸运扭蛋": {
         "recognition": "OCR",
-        "expected": "幸运扭蛋",
+        "expected": "幸运|扭蛋",
         "roi": [550, 80, 170, 330],
         "action": "Click",
         "post_delay": 1200
     },
     "点击日常定位的幸运扭蛋入口": {
         "recognition": "DirectHit",
-        "target": [650, 265],
+        "target": [660, 210],
         "action": "Click",
         "post_delay": 1200
     },

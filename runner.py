@@ -2631,10 +2631,10 @@ def enter_lucky_draw_from_daily(
         action_entry = "点击幸运扭蛋"
     else:
         report(
-            "[扭蛋入口] OCR 未识别“幸运扭蛋”；"
-            "改用日常“前往”定位后的右上入口区域点击"
+            "[扭蛋入口] OCR 未识别“幸运”或“扭蛋”；"
+            "改用日常“前往”定位后的右上扭蛋图标中心点击"
         )
-        capture_debug_step("幸运扭蛋入口文字未识别，使用日常定位固定位置")
+        capture_debug_step("幸运扭蛋入口部分文字未识别，使用扭蛋图标固定位置")
         action_entry = "点击日常定位的幸运扭蛋入口"
 
     run_confirmed_transition(
