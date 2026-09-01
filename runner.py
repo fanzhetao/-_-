@@ -147,6 +147,7 @@ TRANSITION_ACTION_RETRIES = 3
 LOGIN_RESULT_TIMEOUT_SECONDS = 60.0
 LOGIN_RESULT_POLL_TIMEOUT_MS = 150
 LOGIN_RESULT_POLL_INTERVAL_SECONDS = 0.05
+GAME_START_TIMEOUT_SECONDS = 300.0
 LOGIN_FAILURE_ENTRIES = (
     ("登录账号不存在提示", "账号不存在"),
     ("登录密码错误提示", "密码错误"),
@@ -1169,15 +1170,31 @@ def login_and_enter_game(
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    """完成登录；进服加载卡死时重启游戏，并从登录任务起点重来。"""
+    """完成登录；启动或进服卡死时重启游戏，并从登录任务起点重来。"""
     restart_count = 0
     while True:
         ensure_not_cancelled(cancel_event)
-        if start_game_application(device, report):
-            run_task(tasker, "等待游戏登录页", report, cancel_event)
-        else:
-            report("[游戏启动] ADB 直接启动失败，回退到桌面图标识别。")
-            run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        try:
+            if start_game_application(device, report):
+                run_task(tasker, "等待游戏登录页", report, cancel_event)
+            else:
+                report("[游戏启动] ADB 直接启动失败，回退到桌面图标识别。")
+                run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        except AutomationCancelled:
+            raise
+        except RuntimeError as error:
+            restart_count += 1
+            report(
+                "[启动恢复] 游戏启动超过 "
+                f"{GAME_START_TIMEOUT_SECONDS:g} 秒仍未进入登录页，"
+                f"准备关闭游戏后台并重新启动（第 {restart_count} 次）：{error}"
+            )
+            if not close_game_application(device, report):
+                raise RuntimeError(
+                    "游戏启动超时，但游戏后台未能确认关闭，已停止自动恢复。"
+                ) from error
+            ensure_not_cancelled(cancel_event)
+            continue
         validate_reference_canvas(controller, report)
 
         run_task(tasker, "聚焦账号输入框", report, cancel_event)
