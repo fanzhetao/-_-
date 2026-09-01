@@ -1589,69 +1589,75 @@ def claim_monthly_cumulative_rewards(
     controller: AdbController,
     report: Reporter = print,
 ) -> int:
-    """领取所有已达成且未显示绿色领取勾的月累计签到奖励。"""
+    """只领取当前累计签到天数已达成的最高档奖励。"""
     cumulative_days = read_monthly_cumulative_days(tasker)
     if cumulative_days is None:
         report("[签到累计奖励] 未识别到本月累计签到天数，保守跳过")
         return 0
 
     report(f"[签到累计奖励] 本月累计签到 {cumulative_days} 天")
-    claimed_count = 0
+    eligible_rewards = [
+        reward
+        for reward in MONTHLY_CUMULATIVE_REWARDS
+        if reward[0] <= cumulative_days
+    ]
+    if not eligible_rewards:
+        report("[签到累计奖励] 尚未达到首档累计奖励天数，跳过")
+        return 0
+
+    required_days, center = max(eligible_rewards, key=lambda reward: reward[0])
+    report(f"[签到累计奖励] 仅检查最高可领取档位：{required_days} 天")
     image = capture_screen(controller)
-    for required_days, center in MONTHLY_CUMULATIVE_REWARDS:
-        if required_days > cumulative_days:
-            continue
-        already_claimed, green_count = monthly_reward_claimed_at_center(image, center)
-        if already_claimed:
-            report(
-                f"[签到累计奖励] {required_days} 天奖励已领取，"
-                f"绿色勾像素={green_count}"
-            )
-            continue
-
-        report(f"[签到累计奖励] 尝试领取 {required_days} 天奖励")
-        wait_job(
-            controller.post_click(*center),
-            f"点击累计签到 {required_days} 天奖励",
+    already_claimed, green_count = monthly_reward_claimed_at_center(image, center)
+    if already_claimed:
+        report(
+            f"[签到累计奖励] {required_days} 天奖励已领取，"
+            f"绿色勾像素={green_count}"
         )
-        time.sleep(0.35)
-        reward_confirmed = try_execute(tasker, "签到确认按钮", report)
-        if (
-            not reward_confirmed
-            and _try_recognize_once(
-                tasker,
-                "中断赠礼恭喜获得弹层",
-                timeout_ms=1000,
-            )
-            and _try_execute_once(
-                tasker,
-                "关闭中断赠礼恭喜获得固定位置",
-                timeout_ms=1000,
-            )
-        ):
-            reward_confirmed = True
-            report("[签到累计奖励] 已关闭“恭喜获得”结果层")
+        report("[签到累计奖励] 最高档已领取，不检查更低档位")
+        return 0
 
-        if reward_confirmed:
-            claimed_count += 1
-            report(f"[签到累计奖励] 已领取 {required_days} 天奖励")
-            time.sleep(0.2)
-            image = capture_screen(controller)
-            continue
+    report(f"[签到累计奖励] 尝试领取 {required_days} 天奖励")
+    wait_job(
+        controller.post_click(*center),
+        f"点击累计签到 {required_days} 天奖励",
+    )
+    time.sleep(0.35)
+    reward_confirmed = try_execute(tasker, "签到确认按钮", report)
+    if (
+        not reward_confirmed
+        and _try_recognize_once(
+            tasker,
+            "中断赠礼恭喜获得弹层",
+            timeout_ms=1000,
+        )
+        and _try_execute_once(
+            tasker,
+            "关闭中断赠礼恭喜获得固定位置",
+            timeout_ms=1000,
+        )
+    ):
+        reward_confirmed = True
+        report("[签到累计奖励] 已关闭“恭喜获得”结果层")
 
-        image = capture_screen(controller)
-        now_claimed, _green_count = monthly_reward_claimed_at_center(image, center)
-        if now_claimed:
-            claimed_count += 1
-            report(f"[签到累计奖励] 已确认 {required_days} 天奖励出现领取勾")
-        else:
-            report(
-                f"[签到累计奖励] {required_days} 天奖励点击后未确认领取，"
-                "不重复点击"
-            )
+    if reward_confirmed:
+        report(f"[签到累计奖励] 已领取 {required_days} 天奖励")
+        report("[签到累计奖励] 检查完成，本次领取 1 项")
+        return 1
 
-    report(f"[签到累计奖励] 检查完成，本次领取 {claimed_count} 项")
-    return claimed_count
+    image = capture_screen(controller)
+    now_claimed, _green_count = monthly_reward_claimed_at_center(image, center)
+    if now_claimed:
+        report(f"[签到累计奖励] 已确认 {required_days} 天奖励出现领取勾")
+        report("[签到累计奖励] 检查完成，本次领取 1 项")
+        return 1
+
+    report(
+        f"[签到累计奖励] {required_days} 天奖励点击后未确认领取，"
+        "不重复点击"
+    )
+    report("[签到累计奖励] 检查完成，本次领取 0 项")
+    return 0
 
 
 def handle_sign_in(
