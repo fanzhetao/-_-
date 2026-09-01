@@ -2,26 +2,42 @@
     "打开游戏到登录页": {
         "next": [
             "登录页已就绪",
+            "登录页联系客服已就绪",
             "点击时尚百货城图标"
         ],
-        "timeout": 60000
+        "timeout": 300000
+    },
+    "等待游戏登录页": {
+        "next": [
+            "登录页已就绪",
+            "登录页联系客服已就绪"
+        ],
+        "timeout": 300000
     },
     "点击时尚百货城图标": {
         "recognition": "OCR",
         "expected": "时尚百货城",
         "action": "Click",
         "post_delay": 2500,
-        "next": "登录页已就绪",
-        "timeout": 90000
+        "next": [
+            "登录页已就绪",
+            "登录页联系客服已就绪"
+        ],
+        "timeout": 300000
     },
     "登录页已就绪": {
         "recognition": "OCR",
-        "expected": "请输入账号|联系客户|注册账号",
+        "expected": "请输入账号|联系客户|联系客服|注册账号",
         "roi": [140, 430, 440, 420]
+    },
+    "登录页联系客服已就绪": {
+        "recognition": "OCR",
+        "expected": "联系客服",
+        "roi": [0, 0, 720, 1280]
     },
     "聚焦账号输入框": {
         "recognition": "OCR",
-        "expected": "TOMATO|联系客户",
+        "expected": "TOMATO|联系客户|联系客服",
         "roi": [170, 500, 380, 150],
         "action": "Click",
         "target": [360, 605]
@@ -789,14 +805,14 @@
     },
     "点击幸运扭蛋": {
         "recognition": "OCR",
-        "expected": "幸运扭蛋",
+        "expected": "幸运|扭蛋",
         "roi": [550, 80, 170, 330],
         "action": "Click",
         "post_delay": 1200
     },
     "点击日常定位的幸运扭蛋入口": {
         "recognition": "DirectHit",
-        "target": [650, 265],
+        "target": [660, 210],
         "action": "Click",
         "post_delay": 1200
     },
@@ -1150,7 +1166,7 @@
         "recognition": "And",
         "all_of": [
             {"recognition": "OCR", "expected": "^快速战斗$", "roi": [180, 130, 360, 150]},
-            {"recognition": "OCR", "expected": "一键上阵", "roi": [70, 980, 260, 180]},
+            {"recognition": "OCR", "expected": "队伍.*[0-9]+/[0-9]+", "roi": [150, 210, 420, 150]},
             {"recognition": "OCR", "expected": "^战斗$", "roi": [360, 980, 260, 180]}
         ],
         "box_index": 0,

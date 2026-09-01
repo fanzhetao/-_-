@@ -17,7 +17,8 @@ if "--self-check" in sys.argv:
         _SELF_CHECK_MARKER.write_text("started\n", encoding="utf-8")
 
 from fashion_mall import client_state
-from fashion_mall.diagnostics import archive_recent_steps
+from fashion_mall import copy as copy_text
+from fashion_mall.diagnostics import archive_recent_steps, cleanup_error_archives
 from fashion_mall.paths import resolve_paths
 from fashion_mall.ui_helpers import (
     calculate_ui_scale,
@@ -35,10 +36,18 @@ else:
 
 
 APP_VERSION = _PATHS.version_path.read_text(encoding="utf-8").strip()
-BASE_WINDOW_WIDTH = 780
+BASE_WINDOW_WIDTH = 1120
 BASE_WINDOW_HEIGHT = 620
-MIN_WINDOW_WIDTH = 700
+MIN_WINDOW_WIDTH = 1000
 MIN_WINDOW_HEIGHT = 480
+ERROR_HANDLING_NEXT_ACCOUNT = "切换到下一个账号继续"
+ERROR_HANDLING_SKIP_TASK = "跳过该任务并继续执行"
+ERROR_HANDLING_STOP = "立刻弹出报错并停止"
+ERROR_HANDLING_OPTIONS = (
+    ERROR_HANDLING_STOP,
+    ERROR_HANDLING_NEXT_ACCOUNT,
+    ERROR_HANDLING_SKIP_TASK,
+)
 
 
 def enable_windows_dpi_awareness() -> None:
@@ -69,7 +78,7 @@ def enable_windows_dpi_awareness() -> None:
 class FashionMallClient:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title(f"时尚百货城自动化 v{APP_VERSION}")
+        self.root.title(f"{copy_text.APP_NAME} v{APP_VERSION}")
         self.ui_scale = self._configure_display_scaling()
         self.root.geometry(self._centered_geometry(BASE_WINDOW_WIDTH, BASE_WINDOW_HEIGHT))
         self.root.minsize(self._px(MIN_WINDOW_WIDTH), self._px(MIN_WINDOW_HEIGHT))
@@ -89,14 +98,16 @@ class FashionMallClient:
         self.account_drag_changed = False
         self.account_drag_enabled = True
         self.show_password = tk.BooleanVar(value=False)
-        self.continue_on_process_error = tk.BooleanVar(
-            value=runner.load_continue_on_process_error(local_config)
-        )
+        self.account_selection_summary = tk.StringVar(value="已选择 0/0 个账号")
+        if runner.load_continue_on_task_error(local_config):
+            saved_error_handling = ERROR_HANDLING_SKIP_TASK
+        elif runner.load_continue_on_process_error(local_config):
+            saved_error_handling = ERROR_HANDLING_NEXT_ACCOUNT
+        else:
+            saved_error_handling = ERROR_HANDLING_STOP
+        self.error_handling_mode = tk.StringVar(value=saved_error_handling)
         self.package_error_diagnostics = tk.BooleanVar(
             value=runner.load_package_error_diagnostics(local_config)
-        )
-        self.continue_on_task_error = tk.BooleanVar(
-            value=runner.load_continue_on_task_error(local_config)
         )
         self.status = tk.StringVar(value="就绪")
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -109,13 +120,14 @@ class FashionMallClient:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         self.session_log_path = log_dir / f"session-{timestamp}.log"
         self.debug_screenshot_dir = log_dir / f"screenshots-{timestamp}"
-        self._write_session_log("客户端已启动，会话诊断日志已开启。")
+        self._write_session_log("客户端已启动，会话日志已开启。")
 
         self._build_ui()
         self._append_log(
             f"诊断日志：{self.session_log_path}",
             persist=False,
         )
+        self._cleanup_error_diagnostics(automatic=True)
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -134,10 +146,25 @@ class FashionMallClient:
         style = ttk.Style(self.root)
         style.configure(".", font=("Microsoft YaHei UI", 9))
         drag_border_width = max(1, round(2 * scale))
+        style.configure("AccountTable.TFrame", background="#ffffff")
+        style.configure(
+            "AccountHeader.TFrame",
+            background="#eef2f7",
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure(
+            "AccountHeader.TLabel",
+            background="#eef2f7",
+            foreground="#374151",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            anchor="center",
+        )
         style.configure(
             "AccountRow.TFrame",
-            borderwidth=drag_border_width,
-            relief="flat",
+            background="#ffffff",
+            borderwidth=1,
+            relief="solid",
         )
         style.configure(
             "Dragging.AccountRow.TFrame",
@@ -146,10 +173,24 @@ class FashionMallClient:
         )
         style.configure(
             "AccountDragHandle.TLabel",
+            background="#ffffff",
             foreground="#6b7280",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            anchor="center",
         )
         style.configure(
             "Dragging.AccountDragHandle.TLabel",
+            foreground="#2563eb",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        style.configure("AccountActive.TCheckbutton", background="#ffffff")
+        style.configure(
+            "AccountRemove.TButton",
+            foreground="#b42318",
+            padding=(4, 2),
+        )
+        style.configure(
+            "AccountSummary.TLabel",
             foreground="#2563eb",
             font=("Microsoft YaHei UI", 9, "bold"),
         )
@@ -168,137 +209,202 @@ class FashionMallClient:
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=self._px(20))
         outer.pack(fill="both", expand=True)
-        outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(5, weight=1)
+        outer.columnconfigure(1, weight=3)
+        outer.columnconfigure(2, weight=2)
+        outer.rowconfigure(1, weight=1)
 
         ttk.Label(
             outer,
-            text=f"时尚百货城自动化 v{APP_VERSION}",
+            text=f"{copy_text.APP_NAME} v{APP_VERSION}",
             font=("Microsoft YaHei UI", 18, "bold"),
         ).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, self._px(18))
         )
 
         accounts_frame = ttk.LabelFrame(outer, text="账号队列", padding=self._px(8))
-        accounts_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        accounts_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
         accounts_frame.columnconfigure(0, weight=1)
+        accounts_frame.rowconfigure(1, weight=1)
 
         account_toolbar = ttk.Frame(accounts_frame)
         account_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, self._px(6)))
         account_toolbar.columnconfigure(0, weight=1)
-        ttk.Label(account_toolbar, text="拖动左侧“↕ 序号”排序，按顺序执行所有勾选“使用”的账号").grid(
+        ttk.Label(account_toolbar, text="拖动左侧序号调整顺序；仅执行勾选“本轮执行”的账号").grid(
             row=0, column=0, sticky="w"
         )
+        ttk.Label(
+            account_toolbar,
+            textvariable=self.account_selection_summary,
+            style="AccountSummary.TLabel",
+        ).grid(row=0, column=1, padx=(self._px(8), self._px(4)))
         show_button = ttk.Checkbutton(
             account_toolbar,
             text="显示密码",
             variable=self.show_password,
             command=self._toggle_password,
         )
-        show_button.grid(row=0, column=1, padx=self._px(8))
+        show_button.grid(row=0, column=2, padx=self._px(8))
         add_button = ttk.Button(
             account_toolbar,
             text="＋ 添加账号",
             command=self._add_account_row,
         )
-        add_button.grid(row=0, column=2, sticky="e")
+        add_button.grid(row=0, column=3, sticky="e")
         self.account_widgets.extend((show_button, add_button))
 
-        list_frame = ttk.Frame(accounts_frame)
+        list_frame = ttk.Frame(accounts_frame, style="AccountTable.TFrame")
         list_frame.grid(row=1, column=0, sticky="ew")
         list_frame.columnconfigure(0, weight=1)
+        account_header = ttk.Frame(
+            list_frame,
+            style="AccountHeader.TFrame",
+            padding=(self._px(6), self._px(6)),
+        )
+        account_header.grid(row=0, column=0, sticky="ew")
+        self.account_header = account_header
+        account_header.columnconfigure(1, weight=3)
+        account_header.columnconfigure(2, weight=3)
+        header_labels = (
+            "顺序",
+            "账号",
+            "密码",
+            "目标区服",
+            "培育档位",
+            "本轮执行",
+            "操作",
+        )
+        for column, label in enumerate(header_labels):
+            ttk.Label(
+                account_header,
+                text=label,
+                style="AccountHeader.TLabel",
+            ).grid(
+                row=0,
+                column=column,
+                sticky="ew",
+                padx=self._px(3),
+            )
+
         self.accounts_canvas = tk.Canvas(
             list_frame,
             height=self._px(150),
+            background="#ffffff",
+            borderwidth=0,
             highlightthickness=0,
         )
-        self.accounts_canvas.grid(row=0, column=0, sticky="ew")
+        self.accounts_canvas.grid(row=1, column=0, sticky="nsew")
         accounts_scrollbar = ttk.Scrollbar(
             list_frame, orient="vertical", command=self.accounts_canvas.yview
         )
-        accounts_scrollbar.grid(row=0, column=1, sticky="ns")
+        accounts_scrollbar.grid(row=1, column=1, sticky="ns")
         self.accounts_canvas.configure(yscrollcommand=accounts_scrollbar.set)
-        self.accounts_container = ttk.Frame(self.accounts_canvas)
+        self.accounts_container = ttk.Frame(
+            self.accounts_canvas,
+            style="AccountTable.TFrame",
+        )
         self.accounts_window = self.accounts_canvas.create_window(
             (0, 0), window=self.accounts_container, anchor="nw"
         )
         self.accounts_container.bind("<Configure>", self._refresh_accounts_scrollregion)
         self.accounts_canvas.bind("<Configure>", self._resize_accounts_container)
-        account_header = ttk.Frame(self.accounts_container)
-        account_header.pack(fill="x", pady=(0, self._px(2)))
-        account_header.columnconfigure(1, weight=3)
-        account_header.columnconfigure(2, weight=3)
-        ttk.Label(account_header, text="顺序", width=5).grid(row=0, column=0)
-        ttk.Label(account_header, text="游戏账号").grid(row=0, column=1, sticky="w", padx=self._px(3))
-        ttk.Label(account_header, text="游戏密码").grid(row=0, column=2, sticky="w", padx=self._px(3))
-        ttk.Label(account_header, text="区号", width=6).grid(row=0, column=3, padx=self._px(3))
-        ttk.Label(account_header, text="培育选择", width=13).grid(row=0, column=4, padx=self._px(3))
-        ttk.Label(account_header, text="启用", width=5).grid(row=0, column=5, padx=self._px(3))
-        ttk.Label(account_header, text="操作", width=5).grid(row=0, column=6)
         for account_config in self.initial_account_configs:
             self._add_account_row(account_config)
 
-        mode_frame = ttk.LabelFrame(outer, text="运行模式", padding=self._px(8))
+        mode_frame = ttk.LabelFrame(outer, text="运行选项", padding=self._px(8))
         mode_frame.grid(
             row=2,
             column=0,
-            columnspan=3,
+            columnspan=2,
             sticky="ew",
             pady=(self._px(12), 0),
         )
-        self.process_error_mode_button = ttk.Checkbutton(
-            mode_frame,
-            text="进程错误时关闭游戏并继续下一个账号",
-            variable=self.continue_on_process_error,
+        error_handling_row = ttk.Frame(mode_frame)
+        error_handling_row.grid(row=0, column=0, sticky="w")
+        ttk.Label(error_handling_row, text="当遇到任务错误/异常时：").pack(
+            side="left", anchor="n", padx=(0, self._px(6))
         )
-        self.process_error_mode_button.grid(row=0, column=0, sticky="w")
+        error_handling_frame = ttk.Frame(error_handling_row)
+        error_handling_frame.pack(side="left", anchor="n")
+        self.error_handling_buttons = []
+        for row, option in enumerate(ERROR_HANDLING_OPTIONS):
+            button = ttk.Radiobutton(
+                error_handling_frame,
+                text=option,
+                variable=self.error_handling_mode,
+                value=option,
+            )
+            button.grid(row=row, column=0, sticky="w", pady=(0, self._px(3)))
+            self.error_handling_buttons.append(button)
         self.error_diagnostic_button = ttk.Checkbutton(
             mode_frame,
-            text="发生错误时将最近 5 步操作和截图打包为 ZIP",
+            text="保存错误现场：发生错误时，在 runtime/error-diagnostics 中生成错误诊断包",
             variable=self.package_error_diagnostics,
         )
-        self.error_diagnostic_button.grid(row=1, column=0, sticky="w")
-        self.task_error_mode_button = ttk.Checkbutton(
+        self.error_diagnostic_button.grid(
+            row=1, column=0, sticky="w", pady=(self._px(5), 0)
+        )
+        self.cleanup_diagnostics_button = ttk.Button(
             mode_frame,
-            text="业务任务出错时视为完成并继续（始终生成 ZIP）",
-            variable=self.continue_on_task_error,
+            text="清理错误包",
+            command=self._confirm_cleanup_error_diagnostics,
         )
-        self.task_error_mode_button.grid(row=2, column=0, sticky="w")
-        self.account_widgets.extend(
-            (
-                self.process_error_mode_button,
-                self.error_diagnostic_button,
-                self.task_error_mode_button,
-            )
+        self.cleanup_diagnostics_button.grid(
+            row=1,
+            column=1,
+            sticky="e",
+            padx=(self._px(12), 0),
+            pady=(self._px(5), 0),
         )
+        self.account_widgets.extend(self.error_handling_buttons)
+        self.account_widgets.append(self.error_diagnostic_button)
+        self.account_widgets.append(self.cleanup_diagnostics_button)
 
         controls = ttk.Frame(outer)
         controls.grid(
             row=3,
             column=0,
-            columnspan=3,
+            columnspan=2,
             sticky="ew",
             pady=(self._px(14), self._px(10)),
         )
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
         controls.columnconfigure(2, weight=1)
+        controls.columnconfigure(3, weight=1)
         self.start_button = ttk.Button(controls, text="开始运行", command=self._start)
         self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, self._px(6)))
-        self.stop_button = ttk.Button(controls, text="停止", command=self._stop, state="disabled")
+        self.stop_button = ttk.Button(controls, text="停止运行", command=self._stop, state="disabled")
         self.stop_button.grid(row=0, column=1, sticky="ew", padx=self._px(6))
+        self.import_button = ttk.Button(
+            controls,
+            text="导入所有本地配置",
+            command=self._import_local_config,
+        )
+        self.import_button.grid(row=0, column=2, sticky="ew", padx=self._px(6))
         self.clear_button = ttk.Button(controls, text="清除本地配置", command=self._clear_config)
-        self.clear_button.grid(row=0, column=2, sticky="ew", padx=(self._px(6), 0))
+        self.clear_button.grid(row=0, column=3, sticky="ew", padx=(self._px(6), 0))
 
         ttk.Label(outer, textvariable=self.status, foreground="#2563eb").grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(0, self._px(8))
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, self._px(8))
         )
 
-        log_frame = ttk.LabelFrame(outer, text="运行状态", padding=self._px(8))
-        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        log_frame = ttk.LabelFrame(outer, text="运行日志", padding=self._px(8))
+        log_frame.grid(
+            row=1,
+            column=2,
+            rowspan=5,
+            sticky="nsew",
+            padx=(self._px(12), 0),
+        )
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
-        self.log = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 10))
+        self.log = tk.Text(
+            log_frame,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 10),
+            width=40,
+        )
         self.log.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -306,9 +412,9 @@ class FashionMallClient:
 
         ttk.Label(
             outer,
-            text="账号、密码、区号和培育选择会保存在 runtime/config/client_config.json。",
+            text="账号、密码、目标区服和培育档位会保存到本地配置文件。",
             foreground="#666666",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(self._px(10), 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(self._px(10), 0))
 
         self.account_rows[0]["account_entry"].focus_set()
         self.root.bind("<Return>", lambda _event: self._start())
@@ -324,14 +430,39 @@ class FashionMallClient:
     def _resize_accounts_container(self, event) -> None:
         self.accounts_canvas.itemconfigure(self.accounts_window, width=event.width)
 
+    def _sync_account_column_widths(self) -> None:
+        """同步固定列宽，并允许账号、密码列随左侧区域自适应收缩。"""
+
+        frames = [self.account_header, *(row["frame"] for row in self.account_rows)]
+        for column in range(7):
+            if column in (1, 2):
+                for frame in frames:
+                    frame.columnconfigure(column, minsize=0, weight=3)
+                continue
+            requested_width = max(
+                (
+                    widget.winfo_reqwidth()
+                    for frame in frames
+                    for widget in frame.grid_slaves(column=column)
+                ),
+                default=0,
+            )
+            for frame in frames:
+                frame.columnconfigure(column, minsize=requested_width, weight=0)
+
+    def _update_account_selection_summary(self) -> None:
+        total = len(self.account_rows)
+        selected = sum(bool(row["active"].get()) for row in self.account_rows)
+        self.account_selection_summary.set(f"已选择 {selected}/{total} 个账号")
+
     def _add_account_row(self, values: dict | None = None) -> None:
         values = values or {}
         row_frame = ttk.Frame(
             self.accounts_container,
             style="AccountRow.TFrame",
-            padding=(self._px(2), self._px(1)),
+            padding=(self._px(6), self._px(5)),
         )
-        row_frame.pack(fill="x", pady=self._px(3))
+        row_frame.pack(fill="x", pady=(0, self._px(1)))
         row_frame.columnconfigure(1, weight=3)
         row_frame.columnconfigure(2, weight=3)
 
@@ -350,24 +481,25 @@ class FashionMallClient:
 
         number_label = ttk.Label(
             row_frame,
-            text=f"↕ {len(self.account_rows) + 1}",
+            text=f"☰ {len(self.account_rows) + 1}",
             width=5,
             cursor="fleur",
             style="AccountDragHandle.TLabel",
         )
-        number_label.grid(row=0, column=0, padx=(0, self._px(4)))
-        account_entry = ttk.Entry(row_frame, textvariable=account_var)
+        number_label.grid(row=0, column=0, sticky="ew", padx=self._px(3))
+        account_entry = ttk.Entry(row_frame, textvariable=account_var, width=18)
         account_entry.grid(row=0, column=1, sticky="ew", padx=self._px(3))
         password_entry = ttk.Entry(
             row_frame,
             textvariable=password_var,
             show="" if self.show_password.get() else "•",
+            width=18,
         )
         password_entry.grid(row=0, column=2, sticky="ew", padx=self._px(3))
         server_entry = ttk.Spinbox(
             row_frame, from_=1, to=999, textvariable=server_var, width=6
         )
-        server_entry.grid(row=0, column=3, padx=self._px(3))
+        server_entry.grid(row=0, column=3, sticky="ew", padx=self._px(3))
         cultivation_button = ttk.Menubutton(
             row_frame,
             textvariable=cultivation_summary_var,
@@ -403,13 +535,19 @@ class FashionMallClient:
             )
         cultivation_button.configure(menu=cultivation_menu)
         update_cultivation_summary()
-        cultivation_button.grid(row=0, column=4, padx=self._px(3))
-        active_button = ttk.Checkbutton(row_frame, text="使用", variable=active_var)
+        cultivation_button.grid(row=0, column=4, sticky="ew", padx=self._px(3))
+        active_button = ttk.Checkbutton(
+            row_frame,
+            variable=active_var,
+            command=self._update_account_selection_summary,
+            style="AccountActive.TCheckbutton",
+        )
         active_button.grid(row=0, column=5, padx=self._px(3))
         remove_button = ttk.Button(
             row_frame,
-            text="删除",
+            text="移除",
             width=5,
+            style="AccountRemove.TButton",
             command=lambda frame=row_frame: self._remove_account_row(frame),
         )
         remove_button.grid(row=0, column=6, padx=(self._px(3), 0))
@@ -443,6 +581,8 @@ class FashionMallClient:
                 remove_button,
             )
         )
+        self._update_account_selection_summary()
+        self.root.after_idle(self._sync_account_column_widths)
         self.root.after_idle(self._scroll_accounts_to_bottom)
 
     def _scroll_accounts_to_bottom(self) -> None:
@@ -516,7 +656,7 @@ class FashionMallClient:
             self._set_account_drag_visual(self.dragged_account_row, False)
             self.dragged_account_row = None
             if self.account_drag_changed:
-                self._append_log("账号执行顺序已调整；点击开始后将按当前顺序执行。")
+                self._append_log("[账号队列] 执行顺序已调整；开始运行后将按当前顺序执行。")
         self.account_drag_changed = False
         self.account_drag_active = False
         return "break"
@@ -525,13 +665,13 @@ class FashionMallClient:
         for row in self.account_rows:
             row["frame"].pack_forget()
         for index, row in enumerate(self.account_rows, start=1):
-            row["frame"].pack(fill="x", pady=self._px(3))
-            row["number_label"].configure(text=f"↕ {index}")
+            row["frame"].pack(fill="x", pady=(0, self._px(1)))
+            row["number_label"].configure(text=f"☰ {index}")
         self._refresh_accounts_scrollregion()
 
     def _remove_account_row(self, frame: ttk.Frame) -> None:
         if len(self.account_rows) == 1:
-            messagebox.showinfo("至少保留一个账号", "账号列表中至少需要保留一行。", parent=self.root)
+            messagebox.showinfo("无法删除账号", "账号队列至少需要保留一个账号。", parent=self.root)
             return
         removed = next(row for row in self.account_rows if row["frame"] is frame)
         self.account_rows.remove(removed)
@@ -540,7 +680,10 @@ class FashionMallClient:
                 self.account_widgets.remove(widget)
         frame.destroy()
         for index, row in enumerate(self.account_rows, start=1):
-            row["number_label"].configure(text=f"↕ {index}")
+            row["number_label"].configure(text=f"☰ {index}")
+        self._update_account_selection_summary()
+        self.root.after_idle(self._sync_account_column_widths)
+        self.root.after_idle(self._refresh_accounts_scrollregion)
 
     def _collect_accounts(self) -> list[dict]:
         accounts = []
@@ -553,7 +696,7 @@ class FashionMallClient:
                 runner.validate_credential(password, f"第 {index} 个密码")
                 runner.validate_server_number(server_number)
             except ValueError as error:
-                raise RuntimeError(f"第 {index} 个账号的区号必须是整数。") from error
+                raise RuntimeError(f"第 {index} 个账号的目标区服必须是整数。") from error
             accounts.append(
                 {
                     "account": account,
@@ -610,11 +753,12 @@ class FashionMallClient:
         self.log.configure(state="disabled")
 
     def _emit(self, kind: str, message: str) -> None:
-        self.events.put((kind, message))
+        self.events.put((kind, copy_text.normalize_log_message(message)))
 
     def _report(self, message: str) -> None:
-        self._write_session_log(message)
-        self._emit("log", message)
+        normalized = copy_text.normalize_log_message(message)
+        self._write_session_log(normalized)
+        self._emit("log", normalized)
 
     def _start(self) -> None:
         if self.worker is not None and self.worker.is_alive():
@@ -626,28 +770,33 @@ class FashionMallClient:
             messagebox.showerror("输入有误", str(error), parent=self.root)
             return
 
+        error_handling_mode = self.error_handling_mode.get()
+        continue_on_process_error = (
+            error_handling_mode == ERROR_HANDLING_NEXT_ACCOUNT
+        )
+        continue_on_task_error = error_handling_mode == ERROR_HANDLING_SKIP_TASK
+
         try:
             runner.save_account_configs(
                 accounts,
-                continue_on_process_error=bool(self.continue_on_process_error.get()),
+                continue_on_process_error=continue_on_process_error,
                 package_error_diagnostics=bool(self.package_error_diagnostics.get()),
-                continue_on_task_error=bool(self.continue_on_task_error.get()),
+                continue_on_task_error=continue_on_task_error,
             )
         except (OSError, RuntimeError, ValueError) as error:
-            messagebox.showerror("保存失败", f"无法写入本地配置：{error}", parent=self.root)
+            messagebox.showerror("配置保存失败", f"无法保存本地配置：{error}", parent=self.root)
             return
 
         active_accounts = client_state.require_active_accounts(accounts)
-        continue_on_process_error = bool(self.continue_on_process_error.get())
         package_error_diagnostics = bool(self.package_error_diagnostics.get())
-        continue_on_task_error = bool(self.continue_on_task_error.get())
         self.cancel_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
+        self.import_button.configure(state="disabled")
         self._set_account_controls_state("disabled")
         self.status.set("正在运行")
         self._append_log(
-            f"开始运行，共有 {len(active_accounts)} 个已启用账号，正在查找 MuMu 模拟器……"
+            f"[运行] 已开始：共 {len(active_accounts)} 个已启用账号，正在查找 MuMu 模拟器……"
         )
 
         self.worker = threading.Thread(
@@ -663,34 +812,112 @@ class FashionMallClient:
         )
         self.worker.start()
 
+    def _replace_account_rows(self, account_configs: list[dict]) -> None:
+        for row in list(self.account_rows):
+            row["frame"].destroy()
+        self.account_rows.clear()
+        self.account_widgets = self.account_widgets[:2]
+        self.account_widgets.extend(self.error_handling_buttons)
+        self.account_widgets.append(self.error_diagnostic_button)
+        self.account_widgets.append(self.cleanup_diagnostics_button)
+        for account_config in account_configs:
+            self._add_account_row(account_config)
+
+    def _import_local_config(self) -> None:
+        source = filedialog.askopenfilename(
+            title="导入所有本地配置",
+            parent=self.root,
+            filetypes=(("JSON 配置文件", "*.json"), ("所有文件", "*.*")),
+        )
+        if not source:
+            return
+        try:
+            imported = runner.import_local_config(Path(source))
+            account_configs = runner.load_account_configs(imported)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            messagebox.showerror("配置导入失败", str(error), parent=self.root)
+            return
+
+        self._replace_account_rows(account_configs)
+        if runner.load_continue_on_task_error(imported):
+            self.error_handling_mode.set(ERROR_HANDLING_SKIP_TASK)
+        elif runner.load_continue_on_process_error(imported):
+            self.error_handling_mode.set(ERROR_HANDLING_NEXT_ACCOUNT)
+        else:
+            self.error_handling_mode.set(ERROR_HANDLING_STOP)
+        self.package_error_diagnostics.set(
+            runner.load_package_error_diagnostics(imported)
+        )
+        self._append_log(
+            f"[配置] 已导入全部本地配置，共载入 {len(account_configs)} 个账号。"
+        )
+        messagebox.showinfo(
+            "配置导入成功",
+            f"全部本地配置已应用，共导入 {len(account_configs)} 个账号。",
+            parent=self.root,
+        )
+
+    @staticmethod
+    def _format_size(size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB":
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024
+        return f"{size} B"
+
+    def _cleanup_error_diagnostics(self, *, automatic: bool) -> None:
+        archive_root = runner.RUNTIME_DIR / "error-diagnostics"
+        result = cleanup_error_archives(archive_root)
+        if result.removed_count:
+            action = "自动清理" if automatic else "清理"
+            self._append_log(
+                f"[错误包清理] 已{action} "
+                f"{result.removed_count} 个旧错误包，释放 "
+                f"{self._format_size(result.removed_bytes)}。"
+            )
+        if result.failed_count:
+            self._append_log(
+                f"[错误包清理] 有 {result.failed_count} 个错误包清理失败。"
+            )
+        if not automatic and not result.removed_count and not result.failed_count:
+            messagebox.showinfo("清理错误包", "当前没有需要清理的错误包。", parent=self.root)
+
+    def _confirm_cleanup_error_diagnostics(self) -> None:
+        archive_root = runner.RUNTIME_DIR / "error-diagnostics"
+        preview = cleanup_error_archives(archive_root, dry_run=True)
+        if not preview.removed_count:
+            messagebox.showinfo("清理错误包", "当前没有需要清理的错误包。", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "清理错误包",
+            f"将删除 {preview.removed_count} 个旧错误包，预计释放 "
+            f"{self._format_size(preview.removed_bytes)}。\n\n"
+            "规则：超过 14 天、每账号超过 10 个或总容量超过 1 GB。\n"
+            "始终保留最新的错误包。确定继续吗？",
+            parent=self.root,
+        ):
+            return
+        self._cleanup_error_diagnostics(automatic=False)
+
     def _clear_config(self) -> None:
         if not messagebox.askyesno(
             "清除本地配置",
-            "确定删除本地保存的账号、密码、区号和培育选择吗？",
+            "确定删除本地保存的账号、密码、目标区服和培育档位吗？",
             parent=self.root,
         ):
             return
         try:
             runner.clear_local_config()
         except OSError as error:
-            messagebox.showerror("删除失败", str(error), parent=self.root)
+            messagebox.showerror("配置清除失败", str(error), parent=self.root)
             return
-        for row in list(self.account_rows):
-            row["frame"].destroy()
-        self.account_rows.clear()
-        self.account_widgets = self.account_widgets[:2]
-        self.account_widgets.extend(
-            (
-                self.process_error_mode_button,
-                self.error_diagnostic_button,
-                self.task_error_mode_button,
-            )
+        self._replace_account_rows(
+            [{"account": "", "password": "", "server_number": 1, "active": True}]
         )
-        self.continue_on_process_error.set(False)
+        self.error_handling_mode.set(ERROR_HANDLING_STOP)
         self.package_error_diagnostics.set(True)
-        self.continue_on_task_error.set(False)
-        self._add_account_row()
-        self._append_log("本地账号配置已删除。")
+        self._append_log("[配置] 本地账号配置已清除。")
 
     def _run_worker(
         self,
@@ -719,11 +946,25 @@ class FashionMallClient:
                     error_message=error_message,
                 )
             except Exception as archive_error:
-                self._report(f"[报错诊断] ZIP 生成失败：{archive_error}")
+                self._report(f"[错误诊断包] 生成失败：{archive_error}")
                 return None
             self._report(
-                f"[报错诊断] 最近 5 步操作和截图已保存至：{archive_path}"
+                f"[错误诊断包] 最近 5 步操作和截图已保存至：{archive_path}"
             )
+            cleanup_result = cleanup_error_archives(
+                runner.RUNTIME_DIR / "error-diagnostics",
+                protected_paths=(archive_path,),
+            )
+            if cleanup_result.removed_count:
+                self._report(
+                    "[错误包清理] 已清理 "
+                    f"{cleanup_result.removed_count} 个旧错误包，释放 "
+                    f"{self._format_size(cleanup_result.removed_bytes)}。"
+                )
+            if cleanup_result.failed_count:
+                self._report(
+                    f"[错误包清理] 有 {cleanup_result.failed_count} 个错误包清理失败。"
+                )
             return archive_path
 
         try:
@@ -774,30 +1015,30 @@ class FashionMallClient:
                     if not continue_on_process_error:
                         if archive_path is not None:
                             raise RuntimeError(
-                                f"{error}\n报错诊断包：{archive_path}"
+                            f"{error}\n错误诊断包：{archive_path}"
                             ) from error
                         raise
                     if not runner.close_game_after_process_error(self._report):
                         raise RuntimeError(
-                            "发生进程错误，且游戏未能确认关闭；为避免影响下一个账号，账号队列已停止。"
+                            "运行错误后游戏未能确认关闭；为避免影响后续账号，账号队列已停止。"
                         ) from error
                     recovered_error_count += 1
                     self._report(
-                        f"[进程错误恢复] 第 {index}/{total} 个账号已跳过，游戏已关闭"
+                        f"[任务恢复] 第 {index}/{total} 个账号已跳过，游戏已关闭。"
                     )
                     if index < total:
-                        self._report("[账号队列] 即将重新打开游戏并执行下一个账号")
+                        self._report("[账号队列] 即将重新打开游戏并执行下一个账号。")
                     continue
                 if not completed:
                     incomplete_message = client_state.incomplete_message(index, total)
                     archive_path = package_current_error(incomplete_message)
                     if archive_path is not None:
-                        incomplete_message += f"\n报错诊断包：{archive_path}"
+                        incomplete_message += f"\n错误诊断包：{archive_path}"
                     self._emit("incomplete", incomplete_message)
                     return
-                self._report(f"[账号队列] 第 {index}/{total} 个账号已完成，游戏已关闭")
+                self._report(f"[账号队列] 第 {index}/{total} 个账号已完成，游戏已关闭。")
                 if index < total:
-                    self._report("[账号队列] 即将重新打开游戏并执行下一个账号")
+                    self._report("[账号队列] 即将重新打开游戏并执行下一个账号。")
         except runner.AutomationCancelled as error:
             self._emit("cancelled", str(error))
         except Exception as error:
@@ -806,28 +1047,28 @@ class FashionMallClient:
                 archive_path = package_current_error(str(error))
             error_message = str(error)
             if archive_path is not None:
-                error_message += f"\n报错诊断包：{archive_path}"
+                error_message += f"\n错误诊断包：{archive_path}"
             self._emit("error", error_message)
         else:
             if recovered_error_count or recovered_task_error_count:
                 diagnostic_summary = (
-                    "并已生成诊断包。"
+                    "并已生成错误诊断包。"
                     if package_error_diagnostics or recovered_task_error_count
                     else "。"
                 )
                 details = []
                 if recovered_error_count:
-                    details.append(f"{recovered_error_count} 个账号发生进程错误")
+                    details.append(f"{recovered_error_count} 个账号发生运行错误")
                 if recovered_task_error_count:
-                    details.append(f"{recovered_task_error_count} 个业务任务出错后已跳过")
+                    details.append(f"{recovered_task_error_count} 个任务出错后已跳过")
                 self._emit(
                     "done_with_errors",
-                    f"账号队列已结束，共处理 {len(accounts)} 个账号；"
+                    f"[运行结束] 账号队列已结束，共处理 {len(accounts)} 个账号；"
                     f"其中 {'，'.join(details)}"
                     f"{diagnostic_summary}",
                 )
             else:
-                self._emit("done", f"账号队列已完成，共执行 {len(accounts)} 个账号。")
+                self._emit("done", f"[运行结束] 账号队列已完成，共执行 {len(accounts)} 个账号。")
 
     def _stop(self) -> None:
         if self.cancel_event is None:
@@ -835,13 +1076,14 @@ class FashionMallClient:
         self.cancel_event.set()
         self.stop_button.configure(state="disabled")
         self.status.set("正在停止")
-        self._append_log("已请求停止；当前识别动作结束后将退出。")
+        self._append_log("[运行] 已请求停止；当前识别动作完成后将安全退出。")
 
     def _finish(self, status: str, message: str) -> None:
         self.status.set(status)
         self._append_log(message)
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
+        self.import_button.configure(state="normal")
         self._set_account_controls_state("normal")
         self.cancel_event = None
 
@@ -854,14 +1096,14 @@ class FashionMallClient:
                 elif kind == "done":
                     self._finish("已完成", message)
                 elif kind == "done_with_errors":
-                    self._finish("已结束（有错误）", message)
+                    self._finish("已完成（有错误）", message)
                 elif kind == "cancelled":
                     self._finish("已停止", message)
                 elif kind == "incomplete":
                     self._finish("未完全完成", message)
                     messagebox.showwarning("账号队列已停止", message, parent=self.root)
                 elif kind == "error":
-                    self._finish("运行失败", f"执行失败：{message}")
+                    self._finish("运行失败", f"运行失败：{message}")
                     messagebox.showerror("运行失败", message, parent=self.root)
         except queue.Empty:
             pass
@@ -871,7 +1113,7 @@ class FashionMallClient:
         if self.closing:
             return
         if self.worker is not None and self.worker.is_alive():
-            if not messagebox.askyesno("确认退出", "任务仍在运行，确定停止并退出吗？", parent=self.root):
+            if not messagebox.askyesno("确认退出", "任务仍在运行，确定停止运行并退出客户端吗？", parent=self.root):
                 return
             if self.cancel_event is not None:
                 self.cancel_event.set()
@@ -879,7 +1121,7 @@ class FashionMallClient:
             self.status.set("正在停止并关闭")
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="disabled")
-            self._append_log("用户关闭程序，等待当前识别动作结束。")
+            self._append_log("[运行] 用户请求退出，等待当前识别动作完成。")
             self.root.after(100, self._wait_for_worker_then_close)
             return
         self._finish_close()
@@ -891,7 +1133,7 @@ class FashionMallClient:
         self._finish_close()
 
     def _finish_close(self) -> None:
-        self._write_session_log("客户端正常关闭，删除本次会话日志和全部调试截图。")
+        self._write_session_log("客户端正常关闭，清理本次会话日志和调试截图。")
         log_dir = runner.RUNTIME_DIR / "debug"
         for screenshot_dir in log_dir.glob("screenshots-*"):
             if screenshot_dir.is_dir():
@@ -904,7 +1146,7 @@ class FashionMallClient:
 
 
 def main() -> None:
-    global runner, tk, messagebox, ttk
+    global runner, tk, filedialog, messagebox, ttk
     if "--self-check" in sys.argv:
         marker_path = _SELF_CHECK_MARKER
         if marker_path is None:
@@ -928,7 +1170,7 @@ def main() -> None:
         runner = runner_module
     # 延迟加载 UI 依赖，使便携版的无界面自检不受 Tk 安装/显示环境影响。
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     enable_windows_dpi_awareness()
     root = tk.Tk()

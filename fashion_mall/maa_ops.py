@@ -14,7 +14,7 @@ def wait_job(job, label: str, capture: Callable[[str], None] | None = None):
     if not job.succeeded:
         if capture is not None:
             capture(f"失败：{label}")
-        raise RuntimeError(f"{label}失败。请检查模拟器当前页面后重试。")
+        raise RuntimeError(f"{label}执行失败，请检查模拟器当前页面后重试。")
     if capture is not None:
         capture(f"完成：{label}")
     return job

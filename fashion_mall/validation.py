@@ -13,11 +13,11 @@ def server_pattern(server_number: int) -> str:
 
 def validate_credential(value: str, label: str) -> None:
     if not value:
-        raise RuntimeError(f"{label}不能为空。")
+        raise RuntimeError(f"{label}不能为空，请填写后再运行。")
     if any(ord(char) < 32 or ord(char) > 126 for char in value):
-        raise RuntimeError(f"{label}包含非 ASCII 字符，当前安全输入方式暂不支持。")
+        raise RuntimeError(f"{label}包含非 ASCII 字符，当前安全输入方式暂不支持，请修改后重试。")
 
 
 def validate_server_number(value: int) -> None:
     if value < 1 or value > 999:
-        raise RuntimeError("区号必须是 1 到 999 之间的整数。")
+        raise RuntimeError("目标区服必须是 1 到 999 之间的整数。")

@@ -19,6 +19,7 @@ from maa.tasker import Tasker
 from maa.toolkit import AdbDevice, Toolkit
 
 from fashion_mall import config as config_store
+from fashion_mall.copy import normalize_log_message
 from fashion_mall import daily_rules, store_scan, validation
 from fashion_mall import devices as device_discovery
 from fashion_mall import maa_ops
@@ -54,6 +55,7 @@ POPUP_QUIET_SECONDS = 2.0
 OFFLINE_REWARD_WAIT_SECONDS = 20.0
 POPUP_POLL_TIMEOUT_MS = 250
 POPUP_POLL_INTERVAL_SECONDS = 0.15
+TASK_CANCEL_POLL_INTERVAL_SECONDS = 0.05
 INTERRUPTING_POPUP_MAX_RECOVERIES = 30
 INTERRUPTING_POPUP_REFRESH_SECONDS = 0.5
 INTERRUPTING_POPUP_MAX_CONSECUTIVE_ROUNDS = 30
@@ -68,7 +70,10 @@ INTERRUPTING_POPUP_ENTRIES = {
 UNKNOWN_POPUP_FALLBACK_ROUNDS = 3
 UNKNOWN_POPUP_FALLBACK_RETURN_POSITION = (50, 1230)
 UNKNOWN_POPUP_CLICK_SETTLE_SECONDS = 0.75
-UNKNOWN_POPUP_FALLBACK_EXCLUDED_ENTRIES = {"打开游戏到登录页"}
+UNKNOWN_POPUP_FALLBACK_EXCLUDED_ENTRIES = {
+    "打开游戏到登录页",
+    "等待游戏登录页",
+}
 MAIN_SCREEN_ANCHORS = (
     ("主界面锚点百货", "左下“百货”"),
     ("主界面锚点关卡伙伴", "底部“关卡/伙伴”"),
@@ -142,6 +147,7 @@ TRANSITION_ACTION_RETRIES = 3
 LOGIN_RESULT_TIMEOUT_SECONDS = 60.0
 LOGIN_RESULT_POLL_TIMEOUT_MS = 150
 LOGIN_RESULT_POLL_INTERVAL_SECONDS = 0.05
+GAME_START_TIMEOUT_SECONDS = 300.0
 LOGIN_FAILURE_ENTRIES = (
     ("登录账号不存在提示", "账号不存在"),
     ("登录密码错误提示", "密码错误"),
@@ -345,7 +351,7 @@ def validate_cultivation_level(value) -> str:
     normalized = str(value or "").strip()
     if normalized not in CULTIVATION_LEVELS:
         raise RuntimeError(
-            "花房培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
+            "培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
         )
     return normalized
 
@@ -362,11 +368,11 @@ def validate_cultivation_levels(value) -> list[str]:
         if level in requested and level not in normalized:
             normalized.append(level)
     if not normalized:
-        raise RuntimeError("请至少选择一个花房培育档位。")
+        raise RuntimeError("请至少选择一个培育档位。")
     invalid = [str(level) for level in requested if level not in CULTIVATION_LEVELS]
     if invalid:
         raise RuntimeError(
-            "花房培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
+            "培育档位必须是：" + "、".join(CULTIVATION_LEVELS) + "。"
         )
     return normalized
 
@@ -383,21 +389,21 @@ def load_account_configs(config: dict | None = None) -> list[dict]:
 
 
 def load_continue_on_process_error(config: dict | None = None) -> bool:
-    """读取客户端的进程错误恢复模式。"""
+    """读取客户端的账号运行错误恢复选项。"""
     if config is None:
         config = load_local_config()
     return config_store.load_continue_on_process_error(config)
 
 
 def load_package_error_diagnostics(config: dict | None = None) -> bool:
-    """读取客户端的报错诊断包开关。"""
+    """读取客户端的错误诊断包选项。"""
     if config is None:
         config = load_local_config()
     return config_store.load_package_error_diagnostics(config)
 
 
 def load_continue_on_task_error(config: dict | None = None) -> bool:
-    """读取业务任务出错后视为完成并继续的运行模式。"""
+    """读取单项任务出错后跳过并继续的运行选项。"""
     if config is None:
         config = load_local_config()
     return config_store.load_continue_on_task_error(config)
@@ -422,6 +428,27 @@ def save_account_configs(
         package_error_diagnostics=package_error_diagnostics,
         continue_on_task_error=continue_on_task_error,
     )
+
+
+def import_local_config(source_path: Path) -> dict:
+    """校验并完整导入一个配置 JSON，同时保留其中未知的未来字段。"""
+
+    imported = config_store.read_config_for_import(source_path)
+    accounts = load_account_configs(imported)
+    if not accounts:
+        raise ValueError("配置文件中没有可导入的账号。")
+    imported["accounts"] = config_store.normalize_accounts_for_save(
+        accounts,
+        default_levels=DEFAULT_CULTIVATION_LEVELS,
+        validate_credential=validate_credential,
+        validate_server_number=validate_server_number,
+        validate_levels=validate_cultivation_levels,
+    )
+    imported["continue_on_process_error"] = load_continue_on_process_error(imported)
+    imported["package_error_diagnostics"] = load_package_error_diagnostics(imported)
+    imported["continue_on_task_error"] = load_continue_on_task_error(imported)
+    config_store.write_local_config(CLIENT_CONFIG_PATH, imported)
+    return imported
 
 
 def save_local_config(
@@ -454,7 +481,7 @@ def require_ocr_model() -> None:
         names = ", ".join(missing)
         raise RuntimeError(
             f"缺少 OCR 模型文件：{names}\n"
-            f"请将 MaaCommonAssets 的中文 OCR 模型放入：{OCR_DIR}"
+            f"请将 MaaCommonAssets 的中文 OCR 模型放入：{OCR_DIR} 后重试。"
         )
 
 
@@ -501,29 +528,36 @@ def choose_device():
     devices = find_adb_devices()
     if not devices:
         raise RuntimeError(
-            "没有发现 ADB 设备。请先启动 MuMu 模拟器并开启 ADB；"
-            "如 ADB 位于自定义目录，请设置 ADB_PATH。"
+            "未发现 ADB 设备。请先启动 MuMu 模拟器并开启 ADB；"
+            "如果 ADB 位于自定义目录，请设置 ADB_PATH 后重试。"
         )
 
     if len(devices) == 1:
         return devices[0]
 
-    print("发现多个 ADB 设备：")
+    print("发现多个 ADB 设备，请选择要使用的设备：")
     for index, device in enumerate(devices, start=1):
         print(f"  {index}. {device.name} ({device.address})")
 
     while True:
-        raw = input("请选择设备编号：").strip()
+        raw = input("请输入设备编号：").strip()
         if raw.isdigit() and 1 <= int(raw) <= len(devices):
             return devices[int(raw) - 1]
-        print("设备编号无效，请重新输入。")
+        print("设备编号无效，请输入列表中的编号。")
 
 
 def wait_job(job, label: str):
     return maa_ops.wait_job(job, label, capture_debug_step)
 
 
-def _task_succeeded(job) -> bool:
+def _task_succeeded(job, tasker: Tasker | None = None, cancel_event=None) -> bool:
+    if tasker is not None and cancel_event is not None:
+        while not job.done:
+            if cancel_event.is_set():
+                tasker.post_stop().wait()
+                raise AutomationCancelled("用户已停止任务。")
+            time.sleep(TASK_CANCEL_POLL_INTERVAL_SECONDS)
+        ensure_not_cancelled(cancel_event)
     return maa_ops.task_succeeded(job)
 
 
@@ -1030,7 +1064,7 @@ def run_task(
         report(f"[弹窗恢复] 已在执行前清除中断弹窗：{entry}")
     for recovery in range(INTERRUPTING_POPUP_MAX_RECOVERIES + 1):
         ensure_not_cancelled(cancel_event)
-        if _task_succeeded(tasker.post_task(entry)):
+        if _task_succeeded(tasker.post_task(entry), tasker, cancel_event):
             ensure_not_cancelled(cancel_event)
             capture_debug_step(f"完成任务：{entry}")
             return
@@ -1136,11 +1170,31 @@ def login_and_enter_game(
     report: Reporter = print,
     cancel_event=None,
 ) -> None:
-    """完成登录；进服加载卡死时重启游戏，并从登录任务起点重来。"""
+    """完成登录；启动或进服卡死时重启游戏，并从登录任务起点重来。"""
     restart_count = 0
     while True:
         ensure_not_cancelled(cancel_event)
-        run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        try:
+            if start_game_application(device, report):
+                run_task(tasker, "等待游戏登录页", report, cancel_event)
+            else:
+                report("[游戏启动] ADB 直接启动失败，回退到桌面图标识别。")
+                run_task(tasker, "打开游戏到登录页", report, cancel_event)
+        except AutomationCancelled:
+            raise
+        except RuntimeError as error:
+            restart_count += 1
+            report(
+                "[启动恢复] 游戏启动超过 "
+                f"{GAME_START_TIMEOUT_SECONDS:g} 秒仍未进入登录页，"
+                f"准备关闭游戏后台并重新启动（第 {restart_count} 次）：{error}"
+            )
+            if not close_game_application(device, report):
+                raise RuntimeError(
+                    "游戏启动超时，但游戏后台未能确认关闭，已停止自动恢复。"
+                ) from error
+            ensure_not_cancelled(cancel_event)
+            continue
         validate_reference_canvas(controller, report)
 
         run_task(tasker, "聚焦账号输入框", report, cancel_event)
@@ -1535,69 +1589,75 @@ def claim_monthly_cumulative_rewards(
     controller: AdbController,
     report: Reporter = print,
 ) -> int:
-    """领取所有已达成且未显示绿色领取勾的月累计签到奖励。"""
+    """只领取当前累计签到天数已达成的最高档奖励。"""
     cumulative_days = read_monthly_cumulative_days(tasker)
     if cumulative_days is None:
         report("[签到累计奖励] 未识别到本月累计签到天数，保守跳过")
         return 0
 
     report(f"[签到累计奖励] 本月累计签到 {cumulative_days} 天")
-    claimed_count = 0
+    eligible_rewards = [
+        reward
+        for reward in MONTHLY_CUMULATIVE_REWARDS
+        if reward[0] <= cumulative_days
+    ]
+    if not eligible_rewards:
+        report("[签到累计奖励] 尚未达到首档累计奖励天数，跳过")
+        return 0
+
+    required_days, center = max(eligible_rewards, key=lambda reward: reward[0])
+    report(f"[签到累计奖励] 仅检查最高可领取档位：{required_days} 天")
     image = capture_screen(controller)
-    for required_days, center in MONTHLY_CUMULATIVE_REWARDS:
-        if required_days > cumulative_days:
-            continue
-        already_claimed, green_count = monthly_reward_claimed_at_center(image, center)
-        if already_claimed:
-            report(
-                f"[签到累计奖励] {required_days} 天奖励已领取，"
-                f"绿色勾像素={green_count}"
-            )
-            continue
-
-        report(f"[签到累计奖励] 尝试领取 {required_days} 天奖励")
-        wait_job(
-            controller.post_click(*center),
-            f"点击累计签到 {required_days} 天奖励",
+    already_claimed, green_count = monthly_reward_claimed_at_center(image, center)
+    if already_claimed:
+        report(
+            f"[签到累计奖励] {required_days} 天奖励已领取，"
+            f"绿色勾像素={green_count}"
         )
-        time.sleep(0.35)
-        reward_confirmed = try_execute(tasker, "签到确认按钮", report)
-        if (
-            not reward_confirmed
-            and _try_recognize_once(
-                tasker,
-                "中断赠礼恭喜获得弹层",
-                timeout_ms=1000,
-            )
-            and _try_execute_once(
-                tasker,
-                "关闭中断赠礼恭喜获得固定位置",
-                timeout_ms=1000,
-            )
-        ):
-            reward_confirmed = True
-            report("[签到累计奖励] 已关闭“恭喜获得”结果层")
+        report("[签到累计奖励] 最高档已领取，不检查更低档位")
+        return 0
 
-        if reward_confirmed:
-            claimed_count += 1
-            report(f"[签到累计奖励] 已领取 {required_days} 天奖励")
-            time.sleep(0.2)
-            image = capture_screen(controller)
-            continue
+    report(f"[签到累计奖励] 尝试领取 {required_days} 天奖励")
+    wait_job(
+        controller.post_click(*center),
+        f"点击累计签到 {required_days} 天奖励",
+    )
+    time.sleep(0.35)
+    reward_confirmed = try_execute(tasker, "签到确认按钮", report)
+    if (
+        not reward_confirmed
+        and _try_recognize_once(
+            tasker,
+            "中断赠礼恭喜获得弹层",
+            timeout_ms=1000,
+        )
+        and _try_execute_once(
+            tasker,
+            "关闭中断赠礼恭喜获得固定位置",
+            timeout_ms=1000,
+        )
+    ):
+        reward_confirmed = True
+        report("[签到累计奖励] 已关闭“恭喜获得”结果层")
 
-        image = capture_screen(controller)
-        now_claimed, _green_count = monthly_reward_claimed_at_center(image, center)
-        if now_claimed:
-            claimed_count += 1
-            report(f"[签到累计奖励] 已确认 {required_days} 天奖励出现领取勾")
-        else:
-            report(
-                f"[签到累计奖励] {required_days} 天奖励点击后未确认领取，"
-                "不重复点击"
-            )
+    if reward_confirmed:
+        report(f"[签到累计奖励] 已领取 {required_days} 天奖励")
+        report("[签到累计奖励] 检查完成，本次领取 1 项")
+        return 1
 
-    report(f"[签到累计奖励] 检查完成，本次领取 {claimed_count} 项")
-    return claimed_count
+    image = capture_screen(controller)
+    now_claimed, _green_count = monthly_reward_claimed_at_center(image, center)
+    if now_claimed:
+        report(f"[签到累计奖励] 已确认 {required_days} 天奖励出现领取勾")
+        report("[签到累计奖励] 检查完成，本次领取 1 项")
+        return 1
+
+    report(
+        f"[签到累计奖励] {required_days} 天奖励点击后未确认领取，"
+        "不重复点击"
+    )
+    report("[签到累计奖励] 检查完成，本次领取 0 项")
+    return 0
 
 
 def handle_sign_in(
@@ -2571,10 +2631,10 @@ def enter_lucky_draw_from_daily(
         action_entry = "点击幸运扭蛋"
     else:
         report(
-            "[扭蛋入口] OCR 未识别“幸运扭蛋”；"
-            "改用日常“前往”定位后的右上入口区域点击"
+            "[扭蛋入口] OCR 未识别“幸运”或“扭蛋”；"
+            "改用日常“前往”定位后的右上扭蛋图标中心点击"
         )
-        capture_debug_step("幸运扭蛋入口文字未识别，使用日常定位固定位置")
+        capture_debug_step("幸运扭蛋入口部分文字未识别，使用扭蛋图标固定位置")
         action_entry = "点击日常定位的幸运扭蛋入口"
 
     run_confirmed_transition(
@@ -3499,7 +3559,7 @@ def complete_lady_cultivation_daily(
         tasker, controller, report, cancel_event
     ):
         return_to_daily(tasker, report, cancel_event)
-        report("[日常计划] 已跳过名媛会培育和庄园补给，并返回日常页")
+        report("[日常计划] 已跳过名媛会培育并返回日常页")
         return False
     enter_flower_room_from_debutante_club(tasker, report, cancel_event)
     for index, cultivation_level in enumerate(cultivation_levels, start=1):
@@ -3671,6 +3731,43 @@ def complete_manor_supply(
     return purchased
 
 
+def complete_manor_supply_daily(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+    *,
+    already_in_debutante_club: bool = False,
+) -> bool:
+    """独立执行庄园补给；可复用培育结束后的名媛会页面。"""
+    if already_in_debutante_club:
+        report("[日常计划] 独立执行庄园补给；复用当前名媛会页面")
+    else:
+        report("[日常计划] 独立执行庄园补给；从日常页返回主页进入名媛会")
+        wait_job(
+            controller.post_shell("input keyevent 4"),
+            "关闭日常界面返回主页",
+        )
+        if not _transition_confirmed(
+            tasker,
+            "主界面已到达",
+            report,
+            cancel_event,
+        ):
+            raise RuntimeError("关闭日常界面后未能确认返回主页。")
+        if not enter_debutante_club_from_main(
+            tasker, controller, report, cancel_event
+        ):
+            return_to_daily(tasker, report, cancel_event)
+            report("[日常计划] 账号未加入名媛会，已安全跳过庄园补给并返回日常页")
+            return False
+
+    purchased = complete_manor_supply(tasker, controller, report, cancel_event)
+    return_to_daily(tasker, report, cancel_event)
+    report("[日常计划] 庄园补给独立流程已结束并返回日常页")
+    return purchased
+
+
 def claim_daily_completion_and_exit(
     tasker: Tasker,
     controller: AdbController,
@@ -3752,14 +3849,84 @@ def close_game_application(device, report: Reporter = print) -> bool:
     return True
 
 
+def start_game_application(device, report: Reporter = print) -> bool:
+    """通过 ADB 包名直接启动游戏并确认进程存在。"""
+
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    package = os.environ.get("FASHION_MALL_PACKAGE", "").strip() or DEFAULT_GAME_PACKAGE
+    if not re.fullmatch(r"[A-Za-z][\w.]+", package):
+        report(f"[游戏启动] 游戏包名格式无效：{package}")
+        return False
+
+    adb_prefix = [str(device.adb_path), "-s", device.address, "shell"]
+    try:
+        installed = subprocess.run(
+            [*adb_prefix, "pm", "path", package],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=20,
+            check=False,
+            creationflags=creation_flags,
+        )
+        if installed.returncode != 0 or "package:" not in installed.stdout:
+            report(f"[游戏启动] 设备中未确认游戏包：{package}")
+            return False
+
+        launched = subprocess.run(
+            [
+                *adb_prefix,
+                "monkey",
+                "-p",
+                package,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=30,
+            check=False,
+            creationflags=creation_flags,
+        )
+        if launched.returncode != 0:
+            report(f"[游戏启动] ADB 启动命令失败：{package}")
+            return False
+
+        for _ in range(20):
+            running = subprocess.run(
+                [*adb_prefix, "pidof", package],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=10,
+                check=False,
+                creationflags=creation_flags,
+            )
+            if running.returncode == 0 and running.stdout.strip():
+                report(f"[游戏启动] 已通过 ADB 启动并确认游戏进程：{package}")
+                return True
+            time.sleep(0.25)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        report(f"[游戏启动] ADB 直接启动异常：{error}")
+        return False
+
+    report(f"[游戏启动] 已发送启动命令，但未确认游戏进程：{package}")
+    return False
+
+
 def close_game_after_process_error(report: Reporter = print) -> bool:
-    """进程错误恢复时重新发现设备，并关闭已确认包名的游戏进程。"""
+    """账号运行错误恢复时重新发现设备，并关闭已确认包名的游戏进程。"""
     devices = find_adb_devices()
     if not devices:
-        report("[进程错误恢复] 没有发现 ADB 设备，无法关闭游戏")
+        report("[任务恢复] 未发现 ADB 设备，无法关闭游戏。")
         return False
     if len(devices) > 1:
-        report("[进程错误恢复] 发现多个 ADB 设备，使用列表中的第一个设备关闭游戏")
+        report("[任务恢复] 发现多个 ADB 设备，将使用列表中的第一个设备关闭游戏。")
     return close_game_application(devices[0], report)
 
 
@@ -4162,6 +4329,11 @@ def run_automation(
     on_task_error: Callable[[str, Exception], object] | None = None,
 ) -> bool:
     global _ACTIVE_STEP_SCREENSHOT_RECORDER
+    raw_report = report
+
+    def report(message: str) -> None:
+        raw_report(normalize_log_message(message))
+
     require_ocr_model()
     validate_credential(account, "账号")
     validate_credential(password, "密码")
@@ -4177,10 +4349,10 @@ def run_automation(
     if device is None:
         devices = find_adb_devices()
         if not devices:
-            raise RuntimeError("没有发现 ADB 设备，请先启动 MuMu 模拟器并开启 ADB。")
+            raise RuntimeError("未发现 ADB 设备，请先启动 MuMu 模拟器并开启 ADB。")
         device = devices[0]
 
-    report(f"连接设备：{device.name} ({device.address})")
+    report(f"[设备连接] 已连接：{device.name} ({device.address})")
     controller = AdbController(
         adb_path=device.adb_path,
         address=device.address,
@@ -4199,7 +4371,7 @@ def run_automation(
             Path(debug_screenshot_dir),
             report,
         )
-        report(f"[调试截图] 已启用：{debug_screenshot_dir}")
+        report(f"[调试截图] 已启用，保存目录：{debug_screenshot_dir}")
         capture_debug_step("完成：连接模拟器")
 
     try:
@@ -4225,9 +4397,9 @@ def run_automation(
         )
 
         def recover_to_home() -> None:
-            report("[任务错误继续] 正在重启游戏并重新登录当前账号，以恢复到主页")
+            report("[任务恢复] 正在重启游戏并重新登录当前账号，以恢复到主页。")
             if not close_game_application(device, report):
-                raise RuntimeError("业务任务出错后未能安全关闭游戏，无法继续其他任务。")
+                raise RuntimeError("任务出错后未能安全关闭游戏，无法继续其他任务。")
             login_and_enter_game(
                 tasker,
                 controller,
@@ -4262,16 +4434,16 @@ def run_automation(
             except Exception as error:
                 if not continue_on_task_error:
                     raise
-                capture_debug_step(f"业务任务出错并跳过：{name}")
+                capture_debug_step(f"任务出错并跳过：{name}")
                 report(
-                    f"[任务错误继续] 业务任务“{name}”执行出错，"
-                    f"按当前模式视为已完成：{error}"
+                    f"[任务恢复] 任务“{name}”执行出错，"
+                    f"按当前设置跳过并继续：{error}"
                 )
                 archive_path = on_task_error(name, error) if on_task_error else None
                 if archive_path is not None:
-                    report(f"[任务错误继续] 诊断 ZIP：{archive_path}")
+                    report(f"[错误诊断包] 已保存：{archive_path}")
                 recovery()
-                report(f"[任务错误继续] 已恢复运行环境，继续“{name}”之后的任务")
+                report(f"[任务恢复] 运行环境已恢复，继续执行“{name}”之后的任务。")
                 return False
 
         run_business_task(
@@ -4349,9 +4521,12 @@ def run_automation(
             ),
             recover_to_daily,
         )
-        lady_result = {"completed": False}
+        lady_result = {"completed": False, "unjoined": False}
 
-        def complete_lady_and_supply() -> None:
+        def complete_lady_cultivation() -> None:
+            cultivation_was_due = (
+                daily_plan.get("lady_cultivation") == DAILY_STATE_TODO
+            )
             lady_result["completed"] = complete_lady_cultivation_daily(
                 tasker,
                 controller,
@@ -4360,13 +4535,34 @@ def run_automation(
                 report,
                 cancel_event,
             )
-            if lady_result["completed"]:
-                complete_manor_supply(tasker, controller, report, cancel_event)
-                return_to_daily(tasker, report, cancel_event)
+            lady_result["unjoined"] = (
+                cultivation_was_due and not lady_result["completed"]
+            )
 
         run_business_task(
-            "名媛会培育与庄园补给",
-            complete_lady_and_supply,
+            "名媛会培育",
+            complete_lady_cultivation,
+            recover_to_daily,
+        )
+
+        def complete_supply_daily() -> None:
+            if lady_result["unjoined"]:
+                report(
+                    "[日常计划] 培育阶段已确认账号未加入名媛会，"
+                    "庄园补给独立任务安全跳过"
+                )
+                return
+            complete_manor_supply_daily(
+                tasker,
+                controller,
+                report,
+                cancel_event,
+                already_in_debutante_club=lady_result["completed"],
+            )
+
+        run_business_task(
+            "庄园补给",
+            complete_supply_daily,
             recover_to_daily,
         )
         report("[日常计划] 商战已在登录后从主页完成；环球差旅、伙伴培训暂不执行")
@@ -4377,26 +4573,26 @@ def run_automation(
                 tasker, controller, device, report, cancel_event
             )
             if continue_on_task_error and not completion_result["completed"]:
-                raise RuntimeError("100 活跃礼包领取条件未确认满足，尚未完全完成。")
+                raise RuntimeError("未确认已领取 100 活跃礼包，当前账号未完全完成。")
 
         def close_after_final_task_error() -> None:
             if not close_game_application(device, report):
-                raise RuntimeError("收尾任务出错后未能安全关闭游戏。")
+                raise RuntimeError("收尾任务出错后未能安全关闭游戏，无法继续后续账号。")
 
         if not run_business_task(
             "领取日常奖励并退出游戏",
             finish_daily,
             close_after_final_task_error,
         ):
-            report("当前账号的收尾任务已按错误继续模式视为完成。")
+            report("[任务恢复] 收尾任务已按当前设置跳过，视为完成。")
             return True
         if not completion_result["completed"]:
-            report("已完成当前可执行日常流程；100 活跃礼包领取条件未确认满足，尚未完全完成。")
+            report("[日常任务] 当前可执行流程已完成，但未确认已领取 100 活跃礼包；当前账号未完全完成。")
             return False
         else:
             report(
-                "已领取日常 100 活跃礼包，任务已完全完成；"
-                "游戏关闭流程已执行，自动化客户端保持打开。"
+                "[运行结束] 已领取日常 100 活跃礼包，当前账号已完全完成；"
+                "游戏关闭流程已执行，客户端保持打开。"
             )
             return True
     finally:
@@ -4410,12 +4606,12 @@ def main() -> None:
     ]
     continue_on_task_error = load_continue_on_task_error(local_config)
     if accounts:
-        print(f"已从本地配置读取 {len(accounts)} 个启用账号。")
+        print(f"[配置] 已读取本地配置：{len(accounts)} 个启用账号。")
     else:
-        print("首次运行，请输入账号密码；随后会明文保存在本地配置文件中。")
-        account = input("游戏账号：").strip()
-        password = getpass("游戏密码（输入时不会显示）：")
-        server_number = int(input("目标区号：").strip())
+        print("首次运行，请输入账号、密码和目标区服；账号信息将保存在本地配置文件中。")
+        account = input("账号：").strip()
+        password = getpass("密码（输入时不会显示）：")
+        server_number = int(input("目标区服：").strip())
         save_local_config(account, password, server_number)
         accounts = [
             {
@@ -4428,7 +4624,7 @@ def main() -> None:
         ]
     device = choose_device()
     for index, account_config in enumerate(accounts, start=1):
-        print(f"开始执行第 {index}/{len(accounts)} 个账号。")
+        print(f"[账号队列] 第 {index}/{len(accounts)} 个账号开始运行。")
         completed = run_automation(
             account_config["account"],
             account_config["password"],
@@ -4440,7 +4636,7 @@ def main() -> None:
             continue_on_task_error=continue_on_task_error,
         )
         if not completed:
-            print("当前账号未完全完成或游戏未安全关闭，停止后续账号。")
+            print("[账号队列] 当前账号未完全完成或游戏未安全关闭，已停止后续账号。")
             break
 
 
@@ -4448,7 +4644,7 @@ if __name__ == "__main__":
     try:
         main()
     except (KeyboardInterrupt, AutomationCancelled):
-        print("\n用户取消。")
+        print("\n[运行] 用户已停止运行。")
     except Exception as error:
-        print(f"\n执行失败：{error}")
+        print(f"\n[运行失败] {error}")
         raise SystemExit(1) from error
