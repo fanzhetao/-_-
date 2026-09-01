@@ -55,6 +55,7 @@ POPUP_QUIET_SECONDS = 2.0
 OFFLINE_REWARD_WAIT_SECONDS = 20.0
 POPUP_POLL_TIMEOUT_MS = 250
 POPUP_POLL_INTERVAL_SECONDS = 0.15
+TASK_CANCEL_POLL_INTERVAL_SECONDS = 0.05
 INTERRUPTING_POPUP_MAX_RECOVERIES = 30
 INTERRUPTING_POPUP_REFRESH_SECONDS = 0.5
 INTERRUPTING_POPUP_MAX_CONSECUTIVE_ROUNDS = 30
@@ -548,7 +549,14 @@ def wait_job(job, label: str):
     return maa_ops.wait_job(job, label, capture_debug_step)
 
 
-def _task_succeeded(job) -> bool:
+def _task_succeeded(job, tasker: Tasker | None = None, cancel_event=None) -> bool:
+    if tasker is not None and cancel_event is not None:
+        while not job.done:
+            if cancel_event.is_set():
+                tasker.post_stop().wait()
+                raise AutomationCancelled("用户已停止任务。")
+            time.sleep(TASK_CANCEL_POLL_INTERVAL_SECONDS)
+        ensure_not_cancelled(cancel_event)
     return maa_ops.task_succeeded(job)
 
 
@@ -1055,7 +1063,7 @@ def run_task(
         report(f"[弹窗恢复] 已在执行前清除中断弹窗：{entry}")
     for recovery in range(INTERRUPTING_POPUP_MAX_RECOVERIES + 1):
         ensure_not_cancelled(cancel_event)
-        if _task_succeeded(tasker.post_task(entry)):
+        if _task_succeeded(tasker.post_task(entry), tasker, cancel_event):
             ensure_not_cancelled(cancel_event)
             capture_debug_step(f"完成任务：{entry}")
             return
