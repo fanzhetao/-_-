@@ -1166,7 +1166,7 @@
         "recognition": "And",
         "all_of": [
             {"recognition": "OCR", "expected": "^快速战斗$", "roi": [180, 130, 360, 150]},
-            {"recognition": "OCR", "expected": "一键上阵", "roi": [70, 980, 260, 180]},
+            {"recognition": "OCR", "expected": "队伍.*[0-9]+/[0-9]+", "roi": [150, 210, 420, 150]},
             {"recognition": "OCR", "expected": "^战斗$", "roi": [360, 980, 260, 180]}
         ],
         "box_index": 0,
