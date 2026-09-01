@@ -3559,7 +3559,7 @@ def complete_lady_cultivation_daily(
         tasker, controller, report, cancel_event
     ):
         return_to_daily(tasker, report, cancel_event)
-        report("[日常计划] 已跳过名媛会培育和庄园补给，并返回日常页")
+        report("[日常计划] 已跳过名媛会培育并返回日常页")
         return False
     enter_flower_room_from_debutante_club(tasker, report, cancel_event)
     for index, cultivation_level in enumerate(cultivation_levels, start=1):
@@ -3728,6 +3728,43 @@ def complete_manor_supply(
         cancel_event,
     )
     report("[庄园补给] 已关闭补给界面并返回主页")
+    return purchased
+
+
+def complete_manor_supply_daily(
+    tasker: Tasker,
+    controller: AdbController,
+    report: Reporter = print,
+    cancel_event=None,
+    *,
+    already_in_debutante_club: bool = False,
+) -> bool:
+    """独立执行庄园补给；可复用培育结束后的名媛会页面。"""
+    if already_in_debutante_club:
+        report("[日常计划] 独立执行庄园补给；复用当前名媛会页面")
+    else:
+        report("[日常计划] 独立执行庄园补给；从日常页返回主页进入名媛会")
+        wait_job(
+            controller.post_shell("input keyevent 4"),
+            "关闭日常界面返回主页",
+        )
+        if not _transition_confirmed(
+            tasker,
+            "主界面已到达",
+            report,
+            cancel_event,
+        ):
+            raise RuntimeError("关闭日常界面后未能确认返回主页。")
+        if not enter_debutante_club_from_main(
+            tasker, controller, report, cancel_event
+        ):
+            return_to_daily(tasker, report, cancel_event)
+            report("[日常计划] 账号未加入名媛会，已安全跳过庄园补给并返回日常页")
+            return False
+
+    purchased = complete_manor_supply(tasker, controller, report, cancel_event)
+    return_to_daily(tasker, report, cancel_event)
+    report("[日常计划] 庄园补给独立流程已结束并返回日常页")
     return purchased
 
 
@@ -4484,9 +4521,12 @@ def run_automation(
             ),
             recover_to_daily,
         )
-        lady_result = {"completed": False}
+        lady_result = {"completed": False, "unjoined": False}
 
-        def complete_lady_and_supply() -> None:
+        def complete_lady_cultivation() -> None:
+            cultivation_was_due = (
+                daily_plan.get("lady_cultivation") == DAILY_STATE_TODO
+            )
             lady_result["completed"] = complete_lady_cultivation_daily(
                 tasker,
                 controller,
@@ -4495,13 +4535,34 @@ def run_automation(
                 report,
                 cancel_event,
             )
-            if lady_result["completed"]:
-                complete_manor_supply(tasker, controller, report, cancel_event)
-                return_to_daily(tasker, report, cancel_event)
+            lady_result["unjoined"] = (
+                cultivation_was_due and not lady_result["completed"]
+            )
 
         run_business_task(
-            "名媛会培育与庄园补给",
-            complete_lady_and_supply,
+            "名媛会培育",
+            complete_lady_cultivation,
+            recover_to_daily,
+        )
+
+        def complete_supply_daily() -> None:
+            if lady_result["unjoined"]:
+                report(
+                    "[日常计划] 培育阶段已确认账号未加入名媛会，"
+                    "庄园补给独立任务安全跳过"
+                )
+                return
+            complete_manor_supply_daily(
+                tasker,
+                controller,
+                report,
+                cancel_event,
+                already_in_debutante_club=lady_result["completed"],
+            )
+
+        run_business_task(
+            "庄园补给",
+            complete_supply_daily,
             recover_to_daily,
         )
         report("[日常计划] 商战已在登录后从主页完成；环球差旅、伙伴培训暂不执行")
